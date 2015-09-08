@@ -229,11 +229,11 @@ struct chx_stack_regs {
 
 /* System gives their own global tick timers.  */
 # if defined(SYST_BMC2709)
-#define SYST_LOD		0x3F00B400
-#define SYST_VAL		0x3F00B404
-#define SYST_CTL		0x3F00B408
-#define SYST_RLD		0x3F00B418
-#define SYST_CNT		0x3F00B420
+static volatile uint32_t *const SYST_LOD = (uint32_t *const)0x3F00B400;
+static volatile uint32_t *const SYST_VAL = (uint32_t *const)0x3F00B404;
+static volatile uint32_t *const SYST_CTL = (uint32_t *const)0x3F00B408;
+static volatile uint32_t *const SYST_RLD = (uint32_t *const)0x3F00B418;
+static volatile uint32_t *const SYST_CNT = (uint32_t *const)0x3F00B420;
 # else
 #error "you need some global timer implementation"
 # endif
@@ -838,9 +838,9 @@ chx_set_timer (struct chx_thread *q, uint32_t ticks)
   if (q == (struct chx_thread *)&q_timer)
     {
 #if defined(__ARM_ARCH_7A__)
-      *(volatile uint32_t *)SYST_RLD = 0;
-      *(volatile uint32_t *)SYST_LOD = ticks;
-      *(volatile uint32_t *)SYST_CTL = 0x003E00A2;
+      *SYST_RLD = 0;
+      *SYST_LOD = ticks;
+      *SYST_CTL = 0x003E00A2;
 #else
       *SYST_RVR = ticks;
       *SYST_CVR = 0;  /* write (any) to clear the counter to reload.  */
@@ -857,7 +857,7 @@ chx_timer_insert (struct chx_thread *tp, uint32_t usec)
   struct chx_thread *q;
 #if defined(__ARM_ARCH_7A__)
   uint32_t ticks = usec_to_ticks (usec);
-  uint32_t next_ticks = *(volatile uint32_t *)SYST_VAL;
+  uint32_t next_ticks = *SYST_VAL;
 #else
   uint32_t ticks = usec_to_ticks (usec);
   uint32_t next_ticks = *SYST_CVR;
@@ -902,7 +902,7 @@ chx_timer_dequeue (struct chx_thread *tp)
       else
 	{			/* Update timer.  */
 #if defined(__ARM_ARCH_7A__)
-	  uint32_t next_ticks = *(volatile uint32_t *)SYST_VAL + tp->v;
+	  uint32_t next_ticks = *SYST_VAL + tp->v;
 #else
 	  uint32_t next_ticks = *SYST_CVR + tp->v;
 #endif
@@ -1072,9 +1072,9 @@ void
 chx_systick_init (void)
 {
 #if defined(__ARM_ARCH_7A__)
-  *(volatile uint32_t *)SYST_LOD = 0;
-  *(volatile uint32_t *)SYST_RLD = 0;
-  *(volatile uint32_t *)SYST_CTL = 0x003E0000;
+  *SYST_LOD = 0;
+  *SYST_RLD = 0;
+  *SYST_CTL = 0x003E0000;
 #else
   *SYST_RVR = 0;
   *SYST_CVR = 0;
