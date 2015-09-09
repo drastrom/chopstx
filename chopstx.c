@@ -97,7 +97,7 @@
  */
 
 /*
- * SysTick registers.
+ * System tick
  */
 #if defined(__ARM_ARCH_7A__)
 /* System gives their own global tick timers.  */
@@ -111,6 +111,7 @@ static volatile uint32_t *const SYST_CNT = (uint32_t *const)0x3F00B420;
 # error "you need global timer implementation"
 # endif
 #else
+/* SysTick registers.  */
 static volatile uint32_t *const SYST_CSR = (uint32_t *const)0xE000E010;
 static volatile uint32_t *const SYST_RVR = (uint32_t *const)0xE000E014;
 static volatile uint32_t *const SYST_CVR = (uint32_t *const)0xE000E018;
@@ -153,6 +154,130 @@ chx_systick_get (void)
   return *SYST_CVR;
 #endif
 }
+
+#if defined(__ARM_ARCH_7A__)
+# ifndef MHZ
+# define MHZ 1
+# endif
+#else
+# ifndef MHZ
+# define MHZ 72
+# endif
+#endif
+
+static uint32_t usec_to_ticks (uint32_t usec)
+{
+  return usec * MHZ;
+}
+
+/*
+ * Interrupt Handling
+ */
+#if defined(__ARM_ARCH_7A__)
+/* armv7-a doesn't have NVIC-like interrupt controller.  */
+extern void sys_enable_intr (uint8_t irq_num);
+extern void sys_clr_intr (uint8_t irq_num);
+extern void sys_disable_intr (uint8_t irq_num);
+extern void sys_set_intr_prio (uint8_t n);
+
+static void
+chx_enable_intr (uint8_t irq_num)
+{
+  sys_enable_intr (irq_num);
+}
+
+static void
+chx_clr_intr (uint8_t irq_num)
+{
+  sys_clr_intr (irq_num);
+}
+
+static void
+chx_disable_intr (uint8_t irq_num)
+{
+  sys_disable_intr (irq_num);
+}
+
+static void
+chx_set_intr_prio (uint8_t n)
+{
+  sys_set_intr_prio (n);
+}
+#else
+/* NVIC: Nested Vectored Interrupt Controller.  */
+struct NVIC {
+  uint32_t ISER[8];
+  uint32_t unused1[24];
+  uint32_t ICER[8];
+  uint32_t unused2[24];
+  uint32_t ISPR[8];
+  uint32_t unused3[24];
+  uint32_t ICPR[8];
+  uint32_t unused4[24];
+  uint32_t IABR[8];
+  uint32_t unused5[56];
+  uint32_t IPR[60];
+};
+
+static struct NVIC *const NVIC = (struct NVIC *const)0xE000E100;
+#define NVIC_ISER(n)	(NVIC->ISER[n >> 5])
+#define NVIC_ICER(n)	(NVIC->ICER[n >> 5])
+#define NVIC_ICPR(n)	(NVIC->ICPR[n >> 5])
+#define NVIC_IPR(n)	(NVIC->IPR[n >> 2])
+
+#define USB_LP_CAN1_RX0_IRQn	 20
+
+
+static void
+chx_enable_intr (uint8_t irq_num)
+{
+  NVIC_ISER (irq_num) = 1 << (irq_num & 0x1f);
+}
+
+static void
+chx_clr_intr (uint8_t irq_num)
+{				/* Clear pending interrupt.  */
+  NVIC_ICPR (irq_num) = 1 << (irq_num & 0x1f);
+}
+
+static void
+chx_disable_intr (uint8_t irq_num)
+{
+  NVIC_ICER (irq_num) = 1 << (irq_num & 0x1f);
+}
+
+static void
+chx_set_intr_prio (uint8_t n)
+{
+  unsigned int sh = (n & 3) << 3;
+
+  NVIC_IPR (n) = (NVIC_IPR(n) & ~(0xFF << sh))
+    | (CPU_EXCEPTION_PRIORITY_INTERRUPT << sh);
+}
+
+static volatile uint32_t *const ICSR = (uint32_t *const)0xE000ED04;
+#endif
+
+#if defined(__ARM_ARCH_7A__)
+static void
+chx_prio_init (void)
+{
+}
+#else
+/* Priority control.  */
+static uint32_t *const AIRCR = (uint32_t *const)0xE000ED0C;
+static uint32_t *const SHPR2 = (uint32_t *const)0xE000ED1C;
+static uint32_t *const SHPR3 = (uint32_t *const)0xE000ED20;
+
+static void
+chx_prio_init (void)
+{
+  *AIRCR = 0x05FA0000 | ( 5 << 8); /* PRIGROUP = 5, 2-bit:2-bit. */
+  *SHPR2 = (CPU_EXCEPTION_PRIORITY_SVC << 24);
+  *SHPR3 = ((CPU_EXCEPTION_PRIORITY_SYSTICK << 24)
+	    | (CPU_EXCEPTION_PRIORITY_PENDSV << 16));
+}
+#endif
 
 /**
  * chx_fatal - Fatal error point.
@@ -284,49 +409,6 @@ struct chx_stack_regs {
 #define INITIAL_XPSR 0x01000000	/* T=1 */
 #endif
 
-#if defined(__ARM_ARCH_7A__)
-/* armv7-a doesn't have NVIC-like interrupt controller.  */
-
-# ifndef MHZ
-# define MHZ 1
-# endif
-
-#else
-/*
- * NVIC: Nested Vectored Interrupt Controller
- */
-struct NVIC {
-  uint32_t ISER[8];
-  uint32_t unused1[24];
-  uint32_t ICER[8];
-  uint32_t unused2[24];
-  uint32_t ISPR[8];
-  uint32_t unused3[24];
-  uint32_t ICPR[8];
-  uint32_t unused4[24];
-  uint32_t IABR[8];
-  uint32_t unused5[56];
-  uint32_t IPR[60];
-};
-
-static struct NVIC *const NVIC = (struct NVIC *const)0xE000E100;
-#define NVIC_ISER(n)	(NVIC->ISER[n >> 5])
-#define NVIC_ICER(n)	(NVIC->ICER[n >> 5])
-#define NVIC_ICPR(n)	(NVIC->ICPR[n >> 5])
-#define NVIC_IPR(n)	(NVIC->IPR[n >> 2])
-
-#define USB_LP_CAN1_RX0_IRQn	 20
-
-#endif
-
-#ifndef MHZ
-#define MHZ 72
-#endif
-
-static uint32_t usec_to_ticks (uint32_t usec)
-{
-  return usec * MHZ;
-}
 /**************/
 
 struct chx_thread {
@@ -992,72 +1074,8 @@ chx_timer_expired (void)
   chx_spin_unlock (&q_timer.lock);
 }
 
-
-#if defined(__ARM_ARCH_7A__)
-extern void sys_enable_intr (uint8_t irq_num);
-extern void sys_clr_intr (uint8_t irq_num);
-extern void sys_disable_intr (uint8_t irq_num);
-extern void sys_set_intr_prio (uint8_t n);
-
-static void
-chx_enable_intr (uint8_t irq_num)
-{
-  sys_enable_intr (irq_num);
-}
-
-static void
-chx_clr_intr (uint8_t irq_num)
-{
-  sys_clr_intr (irq_num);
-}
-
-static void
-chx_disable_intr (uint8_t irq_num)
-{
-  sys_disable_intr (irq_num);
-}
-
-static void
-chx_set_intr_prio (uint8_t n)
-{
-  sys_set_intr_prio (n);
-}
-
 static chopstx_intr_t *intr_top;
 static struct chx_spinlock intr_lock;
-#else
-static void
-chx_enable_intr (uint8_t irq_num)
-{
-  NVIC_ISER (irq_num) = 1 << (irq_num & 0x1f);
-}
-
-static void
-chx_clr_intr (uint8_t irq_num)
-{				/* Clear pending interrupt.  */
-  NVIC_ICPR (irq_num) = 1 << (irq_num & 0x1f);
-}
-
-static void
-chx_disable_intr (uint8_t irq_num)
-{
-  NVIC_ICER (irq_num) = 1 << (irq_num & 0x1f);
-}
-
-
-static void
-chx_set_intr_prio (uint8_t n)
-{
-  unsigned int sh = (n & 3) << 3;
-
-  NVIC_IPR (n) = (NVIC_IPR(n) & ~(0xFF << sh))
-    | (CPU_EXCEPTION_PRIORITY_INTERRUPT << sh);
-}
-
-static chopstx_intr_t *intr_top;
-static struct chx_spinlock intr_lock;
-static volatile uint32_t *const ICSR = (uint32_t *const)0xE000ED04;
-#endif
 
 #if defined(__ARM_ARCH_7A__)
 void
@@ -1112,26 +1130,12 @@ chx_systick_init (void)
     }
 }
 
-#if !defined(__ARM_ARCH_7A__)
-static uint32_t *const AIRCR = (uint32_t *const)0xE000ED0C;
-static uint32_t *const SHPR2 = (uint32_t *const)0xE000ED1C;
-static uint32_t *const SHPR3 = (uint32_t *const)0xE000ED20;
-#endif
-
 chopstx_t chopstx_main;
 
 void
 chx_init (struct chx_thread *tp)
 {
-#if defined(__ARM_ARCH_7A__)
-  /* No interrupt controller assumed.  */
-#else
-  *AIRCR = 0x05FA0000 | ( 5 << 8); /* PRIGROUP = 5, 2-bit:2-bit. */
-  *SHPR2 = (CPU_EXCEPTION_PRIORITY_SVC << 24);
-  *SHPR3 = ((CPU_EXCEPTION_PRIORITY_SYSTICK << 24)
-	    | (CPU_EXCEPTION_PRIORITY_PENDSV << 16));
-#endif
-
+  chx_prio_init ();
   memset (&tp->tc, 0, sizeof (tp->tc));
 #if defined(__ARM_ARCH_7A__) && defined(__ARM_NEON__)
   tp->tc.fpexc = (1 << 30); /* Enable neon and vfp. */
