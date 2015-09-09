@@ -1,7 +1,7 @@
 /*
  * chopstx.h - Threads and only threads.
  *
- * Copyright (C) 2013 Flying Stone Technology
+ * Copyright (C) 2013, 2015 Flying Stone Technology
  * Author: NIIBE Yutaka <gniibe@fsij.org>
  *
  * This file is a part of Chopstx, a thread library for embedded.
@@ -49,7 +49,11 @@ void chopstx_usec_wait_var (uint32_t *arg);
 void chopstx_usec_wait (uint32_t usec);
 
 struct chx_spinlock {
+#if defined(__ARM_ARCH_7A__)
+  uint32_t value;
+#else
   /* nothing for uniprocessor.  */
+#endif
 };
 
 typedef struct chx_mtx {
@@ -132,4 +136,12 @@ void chopstx_cleanup_pop (int execute);
 
 void chopstx_wakeup_usec_wait (chopstx_t thd);
 
+#if defined(__ARM_ARCH_7A__)
+# if defined(__ARM_NEON__)
+# define CHOPSTX_THREAD_SIZE (60+4+32*8+4+4+32)
+# else
+# define CHOPSTX_THREAD_SIZE (60+32)
+# endif
+#else
 #define CHOPSTX_THREAD_SIZE 60
+#endif

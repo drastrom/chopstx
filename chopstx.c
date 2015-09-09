@@ -77,6 +77,15 @@
 #define CPU_EXCEPTION_PRIORITY_SYSTICK       CPU_EXCEPTION_PRIORITY_INTERRUPT
 #define CPU_EXCEPTION_PRIORITY_INTERRUPT     0xb0
 #define CPU_EXCEPTION_PRIORITY_PENDSV        0xc0
+#elif defined(__ARM_ARCH_7A__)
+/* There is no hardware priority level support for armv7a.  */
+#define CPU_EXCEPTION_PRIORITY_SVC           0x00
+
+#define CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED 0x40
+/* ... */
+#define CPU_EXCEPTION_PRIORITY_SYSTICK       CPU_EXCEPTION_PRIORITY_INTERRUPT
+#define CPU_EXCEPTION_PRIORITY_INTERRUPT     0xb0
+#define CPU_EXCEPTION_PRIORITY_PENDSV        0xc0
 #else
 #error "no support for this arch"
 #endif
@@ -90,30 +99,59 @@
 /*
  * SysTick registers.
  */
+#if defined(__ARM_ARCH_7A__)
+/* System gives their own global tick timers.  */
+# if defined(SYST_BMC2709)
+static volatile uint32_t *const SYST_LOD = (uint32_t *const)0x3F00B400;
+static volatile uint32_t *const SYST_VAL = (uint32_t *const)0x3F00B404;
+static volatile uint32_t *const SYST_CTL = (uint32_t *const)0x3F00B408;
+static volatile uint32_t *const SYST_RLD = (uint32_t *const)0x3F00B418;
+static volatile uint32_t *const SYST_CNT = (uint32_t *const)0x3F00B420;
+# else
+# error "you need global timer implementation"
+# endif
+#else
 static volatile uint32_t *const SYST_CSR = (uint32_t *const)0xE000E010;
 static volatile uint32_t *const SYST_RVR = (uint32_t *const)0xE000E014;
 static volatile uint32_t *const SYST_CVR = (uint32_t *const)0xE000E018;
+#endif
 
 static void
 chx_systick_reset (void)
 {
+#if defined(__ARM_ARCH_7A__)
+  *SYST_LOD = 0;
+  *SYST_RLD = 0;
+  *SYST_CTL = 0x003E0000;
+#else
   *SYST_RVR = 0;
   *SYST_CVR = 0;
   *SYST_CSR = 7;
+#endif
 }
 
 static void
 chx_systick_reload (uint32_t ticks)
 {
+#if defined(__ARM_ARCH_7A__)
+  *SYST_RLD = 0;
+  *SYST_LOD = ticks;
+  *SYST_CTL = 0x003E00A2;
+#else
   *SYST_RVR = ticks;
   *SYST_CVR = 0;  /* write (any) to clear the counter to reload.  */
   *SYST_RVR = 0;
+#endif
 }
 
 static uint32_t
 chx_systick_get (void)
 {
+#if defined(__ARM_ARCH_7A__)
+  return *SYST_VAL;
+#else
   return *SYST_CVR;
+#endif
 }
 
 /**
@@ -132,7 +170,22 @@ chx_fatal (uint32_t err_code)
 
 
 /* RUNNING: the current thread. */
+#if defined(__ARM_ARCH_7A__)
+static inline int
+core_id (void)
+{
+  int i;
+  asm ("mrc	p15, 0, %0, c0, c0, 5\n" : "=r" (i));
+  return i & 3;
+}
+
+#define MAX_CORE 4
+struct chx_thread *runnings[MAX_CORE];
+#define running runnings[core_id ()]
+struct chx_spinlock runnings_lock;
+#else
 struct chx_thread *running;
+#endif
 
 /* Double linked list operations.  */
 struct chx_dll {
@@ -168,17 +221,45 @@ static void chx_timer_insert (struct chx_thread *tp, uint32_t usec);
 /**************/
 static void chx_spin_lock (struct chx_spinlock *lk)
 {
+#if defined(__ARM_ARCH_7A__)
+  uint32_t val, nak = 1;
+  do {
+    asm volatile ("ldrex %0, [%1]\n\t" : "=r" (val) : "r" (&lk->value));
+    if (val != 0)
+      asm volatile ("wfe");
+    else
+      asm volatile ("strex %0, %1, [%2]\n\t"
+		    : "=r" (nak) : "r" (1), "r" (&lk->value) : "memory" );
+  } while (nak);
+  asm volatile ("dmb");
+#else
   (void)lk;
+#endif
 }
 
 static void chx_spin_unlock (struct chx_spinlock *lk)
 {
+#if defined(__ARM_ARCH_7A__)
+  asm volatile ("dmb");
+  lk->value = 0;
+  asm volatile ("dsb");
+  asm volatile ("sev");
+#else
   (void)lk;
+#endif
 }
 
 /* The thread context: specific to ARM Cortex-M3 now.  */
 struct tcontext {
   uint32_t reg[9];	   /* r4, r5, r6, r7, r8, r9, r10, r11, r13 */
+#if defined(__ARM_ARCH_7A__) && defined(__ARM_NEON__)
+  /* uint64_t field gives 8-byte align to tcontext itself.  Add
+     fpad so to avoid implicit padding after tcontext in chx_thread. */
+  uint32_t fpexc;
+  uint64_t dreg[32];	/* d0-d31 */
+  uint32_t fpscr;
+  uint32_t fpad;
+#endif
 };
 
 /* Saved registers on the stack.  */
@@ -197,8 +278,20 @@ struct chx_stack_regs {
 #define REG_PC   6
 #define REG_XPSR 7
 
+#if defined(__ARM_ARCH_7A__)
+#define INITIAL_XPSR 0x0000003f	/* T=1 sys */
+#else
 #define INITIAL_XPSR 0x01000000	/* T=1 */
+#endif
 
+#if defined(__ARM_ARCH_7A__)
+/* armv7-a doesn't have NVIC-like interrupt controller.  */
+
+# ifndef MHZ
+# define MHZ 1
+# endif
+
+#else
 /*
  * NVIC: Nested Vectored Interrupt Controller
  */
@@ -224,6 +317,8 @@ static struct NVIC *const NVIC = (struct NVIC *const)0xE000E100;
 
 #define USB_LP_CAN1_RX0_IRQn	 20
 
+#endif
+
 #ifndef MHZ
 #define MHZ 72
 #endif
@@ -245,6 +340,9 @@ struct chx_thread {
   uint32_t                  : 8;
   uint32_t prio_orig        : 8;
   uint32_t prio             : 8;
+#if defined(__ARM_ARCH_7A__)
+  struct chx_stack_regs stc;
+#endif
   uint32_t v;
   struct chx_mtx *mutex_list;
   struct chx_cleanup *clp;
@@ -257,6 +355,8 @@ chx_cpu_sched_lock (void)
   if (running->prio < CHOPSTX_PRIO_INHIBIT_PREEMPTION)
     {
 #if defined(__ARM_ARCH_6M__)
+      asm volatile ("cpsid	i" : : : "memory");
+#elif defined(__ARM_ARCH_7A__)
       asm volatile ("cpsid	i" : : : "memory");
 #else
       register uint32_t tmp = CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED;
@@ -271,6 +371,8 @@ chx_cpu_sched_unlock (void)
   if (running->prio < CHOPSTX_PRIO_INHIBIT_PREEMPTION)
     {
 #if defined(__ARM_ARCH_6M__)
+      asm volatile ("cpsie	i" : : : "memory");
+#elif defined(__ARM_ARCH_7A__)
       asm volatile ("cpsie	i" : : : "memory");
 #else
       register uint32_t tmp = CPU_EXCEPTION_PRIORITY_CLEAR;
@@ -415,7 +517,8 @@ idle (void)
 }
 
 
-/* Registers on stack (PSP): r0, r1, r2, r3, r12, lr, pc, xpsr */
+/* Registers on stack (PSP): r0, r1, r2, r3, r12, lr, pc, xpsr.
+   v7a uses an additional area on the thread for those registers.  */
 static void __attribute__ ((naked, used))
 sched (void)
 {
@@ -430,9 +533,23 @@ sched (void)
     }
   asm volatile (/* Now, r0 points to the thread to be switched.  */
 		/* Put it to *running.  */
+#if defined(__ARM_ARCH_7A__)
+		"mrc	p15, 0, r2, c0, c0, 5\n\t"
+		"and	r2, r2, #3\n\t"
+		"ldr	r1, =runnings\n\t"
+		/* Update running.  */
+		"str	r0, [r1, r2, lsl #2]\n\t"
+		"ldr	r1, =runnings_lock\n"
+		"mov	r2, #0\n\t"
+		"dmb\n\t"
+		"str	r2, [r1]\n\t"
+		"dsb\n\t"
+		"sev\n\t"
+#else
 		"ldr	r1, =running\n\t"
 		/* Update running.  */
 		"str	r0, [r1]\n\t"
+#endif
 #if defined(__ARM_ARCH_6M__)
 		"cmp	r0, #0\n\t"
 		"beq	1f\n\t"
@@ -450,6 +567,23 @@ sched (void)
 		"ldm	r0!, {r1, r2}\n\t"
 		"mov	r11, r1\n\t"
 		"msr	PSP, r2\n\t"
+#elif defined(__ARM_ARCH_7A__)
+		"ldr	r8, [r0], #4\n\t"
+		"ldr	r9, [r0], #4\n\t"
+		"ldr	r10, [r0], #4\n\t"
+		"ldr	r11, [r0], #4\n\t"
+		"ldr	r1, [r0], #4\n\t"
+		"msr	SP_usr, r1\n\t"
+# if defined(__ARM_NEON__)
+		"ldr	r2, [r0], #4\n\t"
+		"mov	r1, #(1<<30)\n\t"
+		"vmsr	fpexc, r1\n\t"
+		"vldmia.64 r0!,{d0-d15}\n\t"
+		"vldmia.64 r0!,{d16-d31}\n\t"
+		"ldr	r1, [r0], #8\n\t"
+		"vmsr	fpscr, r1\n\t"
+		"vmsr	fpexc, r2\n\t"
+# endif
 #else
 		"ldr	r8, [r0], #4\n\t"
 		"ldr	r9, [r0], #4\n\t"
@@ -459,30 +593,62 @@ sched (void)
 		"msr	PSP, r1\n\t"
 #endif
 		"ldrb	r1, [r0, #3]\n\t" /* ->PRIO field.  */
+#if defined(__ARM_ARCH_7A__)
+		"add	r0, r0, #4\n\t"
+		"ldr	r2, [r0, #7*4]\n\t"
+		"orr	r2, r2, #128\n\t"
+#endif
 		"cmp	r1, #247\n\t"
 		"bhi	0f\n\t"	/* Leave interrupt disabled if >= 248 */
 		/**/
 		/* Unmask interrupts.  */
+#if defined(__ARM_ARCH_7A__)
+		"bic	r2, r2, #128\n"
+#else
 		"mov	r0, #0\n\t"
 #if defined(__ARM_ARCH_6M__)
 		"cpsie	i\n"
 #else
 		"msr	BASEPRI, r0\n"
 #endif
+#endif
 		/**/
 	"0:\n\t"
+#if defined(__ARM_ARCH_7A__)
+		/* r2: New spsr */
+		"ldr	r1, [r0, #5*4]\n\t"
+		"msr	LR_usr, r1\n\t"
+		"mov	r12, r0\n\t"
+		"sub	sp, sp, #8\n\t"
+		"ldr	r0, [r12, #6*4]\n\t"
+		"str	r2, [sp, #4]\n\t"
+		"str	r0, [sp]\n\t"
+		"ldm	r12!, {r0-r3}\n\t"
+		"ldr	r12, [r12]\n\t"
+		"rfe	sp!\n"
+#else
 		"sub	r0, #3\n\t" /* EXC_RETURN to a thread with PSP */
 		"bx	r0\n"
+#endif
 	"1:\n\t"
 		/* Spawn an IDLE thread.  */
 		"ldr	r0, =__main_stack_end__\n\t"
+#if defined(__ARM_ARCH_7A__)
+		"msr	SP_usr, r0\n\t"
+#else
 		"msr	MSP, r0\n\t"
+#endif
 		"mov	r0, #0\n\t"
 		"mov	r1, #0\n\t"
+#if defined(__ARM_ARCH_7A__)
+		"msr	LR_usr, r1\n\t"
+#endif
 		"ldr	r2, =idle\n\t"	     /* PC = idle */
 #if defined(__ARM_ARCH_6M__)
 		"mov	r3, #0x010\n\t"
 		"lsl	r3, r3, #20\n\t" /* xPSR = T-flag set (Thumb) */
+#elif defined(__ARM_ARCH_7A__)
+		"movw	r3, #0x003f\n\t" /* xPSR = T-flag set + sys */
 #else
 		"mov	r3, #0x01000000\n\t" /* xPSR = T-flag set (Thumb) */
 #endif
@@ -497,12 +663,20 @@ sched (void)
 		"mov	r0, #0\n\t"
 #if defined(__ARM_ARCH_6M__)
 		"cpsie	i\n\t"
+#elif defined(__ARM_ARCH_7A__)
+		/* Nothing to do */
 #else
 		"msr	BASEPRI, r0\n\t"
 #endif
 		/**/
+#if defined(__ARM_ARCH_7A__)
+		"ldm	sp!, {r0-r3}\n\t"
+		"ldr	r12, [sp], #8\n\t"
+		"rfe	sp!\n"
+#else
 		"sub	r0, #7\n\t" /* EXC_RETURN to a thread with MSP */
 		"bx	r0\n"
+#endif
 		: /* no output */ : "r" (tp) : "memory");
 }
 
@@ -515,11 +689,30 @@ preempt (void)
   asm (
 #if defined(__ARM_ARCH_6M__)
        "cpsid	i\n\t"
+#elif defined(__ARM_ARCH_7A__)
+       "cpsid	i\n\t"
+       "ldr	r1, =runnings_lock\n"
+  "0:\n\t"
+       "ldrex	r2, [r1]\n\t"
+       "cmp	r2, #0\n\t"
+       "itee	ne\n\t"
+       "wfene\n\t"
+       "strexeq	r2, r0, [r1]\n\t"
+       "cmpeq	r2, #0\n\t"
+       "bne	0b\n\t"
+       "dmb\n\t"
 #else
        "msr	BASEPRI, r0\n\t"
 #endif
+#if defined(__ARM_ARCH_7A__)
+       "mrc	p15, 0, r2, c0, c0, 5\n\t"
+       "and	r2, r2, #3\n\t"
+       "ldr	r1, =runnings\n\t"
+       "ldr	r0, [r1, r2, lsl #2]\n\t"
+#else
        "ldr	r1, =running\n\t"
        "ldr	r0, [r1]\n\t"
+#endif
 #if defined(__ARM_ARCH_6M__)
        "cmp	r0, #0\n\t"
        "bne	0f\n\t"
@@ -527,8 +720,12 @@ preempt (void)
        "cbnz	r0, 0f\n\t"
 #endif
        /* It's idle which was preempted.  Discard saved registers on stack.  */
+#if defined(__ARM_ARCH_7A__)
+       "add	sp, sp, #32\n\t"
+#else
        "ldr	r1, =__main_stack_end__\n\t"
        "msr	MSP, r1\n\t"
+#endif
        "b	sched\n"
   "0:\n\t"
 #if defined(__ARM_ARCH_6M__)
@@ -543,8 +740,29 @@ preempt (void)
        "mov	r3, r9\n\t"
        "mov	r4, r10\n\t"
        "mov	r5, r11\n\t"
+#if defined(__ARM_ARCH_7A__)
+       "mrs	r6, SP_usr\n\t"
+       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
+# if defined(__ARM_NEON__)
+       "vmrs	r2, fpexc\n\t"
+       "str	r2, [r1], #4\n\t"
+       "mov	r2, #(1<<30)\n\t"
+       "vmsr	fpexc, r2\n\t"
+       "vstmia.64 r1!,{d0-d15}\n\t"
+       "vstmia.64 r1!,{d16-d31}\n\t"
+       "vmrs	r2, fpscr\n\t"
+       "str	r2, [r1], #8\n\t"
+# endif
+       "add	r6, r1, #4\n\t"
+       /* Copy saved registers on SP_svc to tp->stc.  */
+       "ldm	sp!, {r1, r3, r4, r5}\n\t"
+       "stm	r6!, {r1, r3, r4, r5}\n\t"
+       "ldm	sp!, {r2, r3, r4, r5}\n\t"
+       "stm	r6!, {r2, r3, r4, r5}"
+#else
        "mrs	r6, PSP\n\t" /* r13(=SP) in user space.  */
        "stm	r1!, {r2, r3, r4, r5, r6}"
+#endif
        : "=r" (tp)
        : "r" (tp)
        : "r1", "r2", "r3", "r4", "r5", "r6", "cc", "memory");
@@ -587,8 +805,28 @@ svc (void)
   register struct chx_thread *tp asm ("r0");
   register uint32_t orig_r0 asm ("r1");
 
-  asm ("ldr	r1, =running\n\t"
+  asm (/* Get running.  */
+#if defined(__ARM_ARCH_7A__)
+       /* Get spin lock before running.  */
+       "mov	r0, #1\n\t"
+       "ldr	r1, =runnings_lock\n"
+  "0:\n\t"
+       "ldrex	r2, [r1]\n\t"
+       "cmp	r2, #0\n\t"
+       "itee	ne\n\t"
+       "wfene\n\t"
+       "strexeq	r2, r0, [r1]\n\t"
+       "cmpeq	r2, #0\n\t"
+       "bne	0b\n\t"
+       "dmb\n\t"
+       "mrc	p15, 0, r2, c0, c0, 5\n\t"
+       "and	r2, r2, #3\n\t"
+       "ldr	r1, =runnings\n\t"
+       "ldr	r0, [r1, r2, lsl #2]\n\t"
+#else
+       "ldr	r1, =running\n\t"
        "ldr	r0, [r1]\n\t"
+#endif
 #if defined(__ARM_ARCH_6M__)
        "add	r1, r0, #4\n\t"
        "add	r1, #4\n\t"
@@ -601,9 +839,30 @@ svc (void)
        "mov	r3, r9\n\t"
        "mov	r4, r10\n\t"
        "mov	r5, r11\n\t"
+#if defined(__ARM_ARCH_7A__)
+       "mrs	r6, SP_usr\n\t"
+       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
+# if defined(__ARM_NEON__)
+       "vmrs	r2, fpexc\n\t"
+       "str	r2, [r1], #4\n\t"
+       "mov	r2, #(1<<30)\n\t"
+       "vmsr	fpexc, r2\n\t"
+       "vstmia.64 r1!,{d0-d15}\n\t"
+       "vstmia.64 r1!,{d16-d31}\n\t"
+       "vmrs	r2, fpscr\n\t"
+       "str	r2, [r1], #8\n\t"
+# endif
+       "add	r6, r1, #4\n\t"
+       /* Copy saved registers on SP_svc to tp->stc.  */
+       "ldm	sp!, {r1, r3, r4, r5}\n\t"
+       "stm	r6!, {r1, r3, r4, r5}\n\t"
+       "ldm	sp!, {r2, r3, r4, r5}\n\t"
+       "stm	r6!, {r2, r3, r4, r5}"
+#else
        "mrs	r6, PSP\n\t" /* r13(=SP) in user space.  */
        "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
        "ldr	r1, [r6]"
+#endif
        : "=r" (tp), "=r" (orig_r0)
        : /* no input */
        : "r2", "r3", "r4", "r5", "r6", "memory");
@@ -633,9 +892,9 @@ chx_set_timer (struct chx_thread *q, uint32_t ticks)
 static void
 chx_timer_insert (struct chx_thread *tp, uint32_t usec)
 {
+  struct chx_thread *q;
   uint32_t ticks = usec_to_ticks (usec);
   uint32_t next_ticks = chx_systick_get ();
-  struct chx_thread *q;
 
   for (q = q_timer.next; q != (struct chx_thread *)&q_timer; q = q->next)
     {
@@ -676,7 +935,6 @@ chx_timer_dequeue (struct chx_thread *tp)
       else
 	{			/* Update timer.  */
 	  uint32_t next_ticks = chx_systick_get () + tp->v;
-
 	  chx_set_timer (tp_prev, next_ticks);
 	}
     }
@@ -735,6 +993,39 @@ chx_timer_expired (void)
 }
 
 
+#if defined(__ARM_ARCH_7A__)
+extern void sys_enable_intr (uint8_t irq_num);
+extern void sys_clr_intr (uint8_t irq_num);
+extern void sys_disable_intr (uint8_t irq_num);
+extern void sys_set_intr_prio (uint8_t n);
+
+static void
+chx_enable_intr (uint8_t irq_num)
+{
+  sys_enable_intr (irq_num);
+}
+
+static void
+chx_clr_intr (uint8_t irq_num)
+{
+  sys_clr_intr (irq_num);
+}
+
+static void
+chx_disable_intr (uint8_t irq_num)
+{
+  sys_disable_intr (irq_num);
+}
+
+static void
+chx_set_intr_prio (uint8_t n)
+{
+  sys_set_intr_prio (n);
+}
+
+static chopstx_intr_t *intr_top;
+static struct chx_spinlock intr_lock;
+#else
 static void
 chx_enable_intr (uint8_t irq_num)
 {
@@ -766,16 +1057,24 @@ chx_set_intr_prio (uint8_t n)
 static chopstx_intr_t *intr_top;
 static struct chx_spinlock intr_lock;
 static volatile uint32_t *const ICSR = (uint32_t *const)0xE000ED04;
+#endif
 
+#if defined(__ARM_ARCH_7A__)
+void
+chx_handle_intr (uint32_t irq_num)
+#else
 void
 chx_handle_intr (void)
+#endif
 {
   chopstx_intr_t *intr;
+#if !defined(__ARM_ARCH_7A__)
   register uint32_t irq_num;
 
   asm volatile ("mrs	%0, IPSR\n\t"
 		"sub	%0, #16"   /* Exception # - 16 = interrupt number.  */
 		: "=r" (irq_num) : /* no input */ : "memory");
+#endif
   chx_disable_intr (irq_num);
   chx_spin_lock (&intr_lock);
   for (intr = intr_top; intr; intr = intr->next)
@@ -785,7 +1084,11 @@ chx_handle_intr (void)
   if (intr)
     {
       intr->ready++;
+#if defined(__ARM_ARCH_7A__)
+      if (intr->tp->state == THREAD_WAIT_INT)
+#else
       if (intr->tp != running && intr->tp->state == THREAD_WAIT_INT)
+#endif
 	{
 	  chx_ready_enqueue (intr->tp);
 	  chx_request_preemption (intr->tp->prio);
@@ -809,21 +1112,30 @@ chx_systick_init (void)
     }
 }
 
+#if !defined(__ARM_ARCH_7A__)
 static uint32_t *const AIRCR = (uint32_t *const)0xE000ED0C;
 static uint32_t *const SHPR2 = (uint32_t *const)0xE000ED1C;
 static uint32_t *const SHPR3 = (uint32_t *const)0xE000ED20;
+#endif
 
 chopstx_t chopstx_main;
 
 void
 chx_init (struct chx_thread *tp)
 {
+#if defined(__ARM_ARCH_7A__)
+  /* No interrupt controller assumed.  */
+#else
   *AIRCR = 0x05FA0000 | ( 5 << 8); /* PRIGROUP = 5, 2-bit:2-bit. */
   *SHPR2 = (CPU_EXCEPTION_PRIORITY_SVC << 24);
   *SHPR3 = ((CPU_EXCEPTION_PRIORITY_SYSTICK << 24)
 	    | (CPU_EXCEPTION_PRIORITY_PENDSV << 16));
+#endif
 
   memset (&tp->tc, 0, sizeof (tp->tc));
+#if defined(__ARM_ARCH_7A__) && defined(__ARM_NEON__)
+  tp->tc.fpexc = (1 << 30); /* Enable neon and vfp. */
+#endif
   q_ready.next = q_ready.prev = (struct chx_thread *)&q_ready;
   q_timer.next = q_timer.prev = (struct chx_thread *)&q_timer;
   q_exit.next = q_exit.prev = (struct chx_thread *)&q_exit;
@@ -848,6 +1160,16 @@ chx_init (struct chx_thread *tp)
   chopstx_main = (chopstx_t)tp;
 }
 
+
+#if defined(__ARM_ARCH_7A__)
+extern void sys_secondary_init (void);
+
+void
+chx_secondary_init (void)
+{
+  sys_secondary_init ();
+}
+#endif
 
 /**
  * chopstx_main_init - initialize main thread
@@ -874,11 +1196,41 @@ chopstx_main_init (chopstx_prio_t prio)
 static void
 chx_request_preemption (uint16_t prio)
 {
+#if defined(__ARM_ARCH_7A__)
+  int i, id = -1;
+  uint16_t low = MAX_PRIO;
+  extern void sys_request_preemption (int id);
+  /* armv7-a have no PendSV mechanism.  Some implementation dependant
+     interrupt could be used.  */
+
+  chx_spin_lock (&runnings_lock);
+  for (i = 0; i < MAX_CORE; i++)
+    {
+      if (runnings[i] == NULL)
+	{
+	  sys_request_preemption (i);
+	  chx_spin_unlock (&runnings_lock);
+	  return;
+	}
+    }
+  for (i = 0; i < MAX_CORE; i++)
+    {
+      if ((uint16_t)runnings[i]->prio < low)
+	{
+	  low = (uint16_t)runnings[i]->prio;
+	  id = i;
+	}
+    }
+  if (id >= 0 && low < prio)
+    sys_request_preemption (id);
+  chx_spin_unlock (&runnings_lock);
+#else
   if (running == NULL || (uint16_t)running->prio < prio)
     {
       *ICSR = (1 << 28);
       asm volatile ("" : : : "memory");
     }
+#endif
 }
 
 #define CHX_SLEEP 0
@@ -996,11 +1348,18 @@ chopstx_create (uint32_t flags_and_prio,
   if (stack_size < sizeof (struct chx_thread) + 8 * sizeof (uint32_t))
     chx_fatal (CHOPSTX_ERR_THREAD_CREATE);
 
+#if defined(__ARM_ARCH_7A__)
+  stack = (void *)(stack_addr + stack_size - sizeof (struct chx_thread));
+  tp = (struct chx_thread *)stack;
+  p = (struct chx_stack_regs *)&tp->stc;
+  memset ((void *)p, 0, sizeof (struct chx_stack_regs));
+#else
   stack = (void *)(stack_addr + stack_size - sizeof (struct chx_thread)
 		   - sizeof (struct chx_stack_regs));
   memset (stack, 0, sizeof (struct chx_stack_regs));
   tp = (struct chx_thread *)(stack + sizeof (struct chx_stack_regs));
   p = (struct chx_stack_regs *)stack;
+#endif
   p->reg[REG_R0] = (uint32_t)arg;
   p->reg[REG_LR] = (uint32_t)chopstx_exit;
   p->reg[REG_PC] = (uint32_t)thread_entry;
@@ -1008,6 +1367,9 @@ chopstx_create (uint32_t flags_and_prio,
 
   memset (&tp->tc, 0, sizeof (tp->tc));
   tp->tc.reg[REG_SP] = (uint32_t)stack;
+#if defined(__ARM_ARCH_7A__) && defined(__ARM_NEON__)
+  tp->tc.fpexc = (1 << 30); /* Enable neon and vfp. */
+#endif
   tp->next = tp->prev = tp;
   tp->mutex_list = NULL;
   tp->clp = NULL;
