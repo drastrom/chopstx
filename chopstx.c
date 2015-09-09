@@ -278,326 +278,10 @@ chx_prio_init (void)
 	    | (CPU_EXCEPTION_PRIORITY_PENDSV << 16));
 }
 #endif
-
-/**
- * chx_fatal - Fatal error point.
- * @err_code: Error code
- *
- * When it detects a coding error, this function will be called to
- * stop further execution of code.  It never returns.
- */
-void
-chx_fatal (uint32_t err_code)
-{
-  (void)err_code;
-  for (;;);
-}
-
-
-/* RUNNING: the current thread. */
-#if defined(__ARM_ARCH_7A__)
-static inline int
-core_id (void)
-{
-  int i;
-  asm ("mrc	p15, 0, %0, c0, c0, 5\n" : "=r" (i));
-  return i & 3;
-}
-
-#define MAX_CORE 4
-struct chx_thread *runnings[MAX_CORE];
-#define running runnings[core_id ()]
-struct chx_spinlock runnings_lock;
-#else
-struct chx_thread *running;
-#endif
-
-/* Double linked list operations.  */
-struct chx_dll {
-  struct chx_thread *next, *prev;
-};
-
-
-struct chx_queue {
-  struct chx_thread *next, *prev;
-  struct chx_spinlock lock;
-};
-
-/* READY: priority queue. */
-static struct chx_queue q_ready;
-
-/* Queue of threads waiting for timer.  */
-static struct chx_queue q_timer;
-
-/* Queue of threads which have been exited. */
-static struct chx_queue q_exit;
-
-/* Queue of threads which wait exit of some thread.  */
-static struct chx_queue q_join;
-
-
-/* Forward declaration(s). */
-static void chx_request_preemption (uint16_t prio);
-static void chx_timer_dequeue (struct chx_thread *tp);
-static void chx_timer_insert (struct chx_thread *tp, uint32_t usec);
-
-
-
-/**************/
-static void chx_spin_lock (struct chx_spinlock *lk)
-{
-#if defined(__ARM_ARCH_7A__)
-  uint32_t val, nak = 1;
-  do {
-    asm volatile ("ldrex %0, [%1]\n\t" : "=r" (val) : "r" (&lk->value));
-    if (val != 0)
-      asm volatile ("wfe");
-    else
-      asm volatile ("strex %0, %1, [%2]\n\t"
-		    : "=r" (nak) : "r" (1), "r" (&lk->value) : "memory" );
-  } while (nak);
-  asm volatile ("dmb");
-#else
-  (void)lk;
-#endif
-}
-
-static void chx_spin_unlock (struct chx_spinlock *lk)
-{
-#if defined(__ARM_ARCH_7A__)
-  asm volatile ("dmb");
-  lk->value = 0;
-  asm volatile ("dsb");
-  asm volatile ("sev");
-#else
-  (void)lk;
-#endif
-}
-
-/* The thread context: specific to ARM Cortex-M3 now.  */
-struct tcontext {
-  uint32_t reg[9];	   /* r4, r5, r6, r7, r8, r9, r10, r11, r13 */
-#if defined(__ARM_ARCH_7A__) && defined(__ARM_NEON__)
-  /* uint64_t field gives 8-byte align to tcontext itself.  Add
-     fpad so to avoid implicit padding after tcontext in chx_thread. */
-  uint32_t fpexc;
-  uint64_t dreg[32];	/* d0-d31 */
-  uint32_t fpscr;
-  uint32_t fpad;
-#endif
-};
-
-/* Saved registers on the stack.  */
-struct chx_stack_regs {
-  uint32_t reg[8];	       /* r0, r1, r2, r3, r12, lr, pc, xpsr */
-};
 
 /*
- * Constants for ARM.
+ * Exception Handling
  */
-#define REG_EXIT 4		/* R8 */
-#define REG_SP 8
-
-#define REG_R0   0
-#define REG_LR   5
-#define REG_PC   6
-#define REG_XPSR 7
-
-#if defined(__ARM_ARCH_7A__)
-#define INITIAL_XPSR 0x0000003f	/* T=1 sys */
-#else
-#define INITIAL_XPSR 0x01000000	/* T=1 */
-#endif
-
-/**************/
-
-struct chx_thread {
-  struct chx_thread *next, *prev;
-  struct tcontext tc;
-  uint32_t state            : 4;
-  uint32_t flag_detached    : 1;
-  uint32_t flag_got_cancel  : 1;
-  uint32_t flag_join_req    : 1;
-  uint32_t flag_sched_rr    : 1;
-  uint32_t                  : 8;
-  uint32_t prio_orig        : 8;
-  uint32_t prio             : 8;
-#if defined(__ARM_ARCH_7A__)
-  struct chx_stack_regs stc;
-#endif
-  uint32_t v;
-  struct chx_mtx *mutex_list;
-  struct chx_cleanup *clp;
-};
-
-
-static void
-chx_cpu_sched_lock (void)
-{
-  if (running->prio < CHOPSTX_PRIO_INHIBIT_PREEMPTION)
-    {
-#if defined(__ARM_ARCH_6M__)
-      asm volatile ("cpsid	i" : : : "memory");
-#elif defined(__ARM_ARCH_7A__)
-      asm volatile ("cpsid	i" : : : "memory");
-#else
-      register uint32_t tmp = CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED;
-      asm volatile ("msr	BASEPRI, %0" : : "r" (tmp) : "memory");
-#endif
-    }
-}
-
-static void
-chx_cpu_sched_unlock (void)
-{
-  if (running->prio < CHOPSTX_PRIO_INHIBIT_PREEMPTION)
-    {
-#if defined(__ARM_ARCH_6M__)
-      asm volatile ("cpsie	i" : : : "memory");
-#elif defined(__ARM_ARCH_7A__)
-      asm volatile ("cpsie	i" : : : "memory");
-#else
-      register uint32_t tmp = CPU_EXCEPTION_PRIORITY_CLEAR;
-      asm volatile ("msr	BASEPRI, %0" : : "r" (tmp) : "memory");
-#endif
-    }
-}
-
-
-/*
- * Double linked list handling.
- */
-
-static int
-ll_empty (void *head)
-{
-  struct chx_thread *l = (struct chx_thread *)head;
-
-  return (struct chx_thread *)l == l->next;
-}
-
-static struct chx_thread *
-ll_dequeue (struct chx_thread *tp)
-{
-  tp->next->prev = tp->prev;
-  tp->prev->next = tp->next;
-  tp->prev = tp->next = tp;
-  return tp;
-}
-
-static void
-ll_insert (struct chx_thread *tp0, void *head)
-{
-  struct chx_thread *tp = (struct chx_thread *)head;
-
-  tp0->next = tp;
-  tp0->prev = tp->prev;
-  tp->prev->next = tp0;
-  tp->prev = tp0;
-}
-
-
-static struct chx_thread *
-ll_pop (void *head)
-{
-  struct chx_thread *l = (struct chx_thread *)head;
-  struct chx_thread *tp0 = l->next;
-
-  if (tp0 == l)
-    return NULL;
-
-  return ll_dequeue (tp0);
-}
-
-static void
-ll_prio_push (struct chx_thread *tp0, void *head)
-{
-  struct chx_thread *l = (struct chx_thread *)head;
-  struct chx_thread *tp;
-
-  for (tp = l->next; tp != l; tp = tp->next)
-    if (tp->prio <= tp0->prio)
-      break;
-
-  ll_insert (tp0, tp);
-}
-
-static void
-ll_prio_enqueue (struct chx_thread *tp0, void *head)
-{
-  struct chx_thread *l = (struct chx_thread *)head;
-  struct chx_thread *tp;
-
-  for (tp = l->next; tp != l; tp = tp->next)
-    if (tp->prio < tp0->prio)
-      break;
-
-  ll_insert (tp0, tp);
-}
-
-
-/*
- * Thread status.
- */
-enum  {
-  THREAD_RUNNING=0,
-  THREAD_READY,
-  THREAD_WAIT_MTX,
-  THREAD_WAIT_CND,
-  THREAD_WAIT_TIME,
-  THREAD_WAIT_INT,
-  THREAD_JOIN,
-  /**/
-  THREAD_EXITED=0x0E,
-  THREAD_FINISHED=0x0F
-};
-
-
-static struct chx_thread *
-chx_ready_pop (void)
-{
-  struct chx_thread *tp;
-
-  chx_spin_lock (&q_ready.lock);
-  tp = ll_pop (&q_ready);
-  if (tp)
-    tp->state = THREAD_RUNNING;
-  chx_spin_unlock (&q_ready.lock);
-
-  return tp;
-}
-
-
-static void
-chx_ready_push (struct chx_thread *tp)
-{
-  chx_spin_lock (&q_ready.lock);
-  tp->state = THREAD_READY;
-  ll_prio_push (tp, &q_ready);
-  chx_spin_unlock (&q_ready.lock);
-}
-
-
-static void
-chx_ready_enqueue (struct chx_thread *tp)
-{
-  chx_spin_lock (&q_ready.lock);
-  tp->state = THREAD_READY;
-  ll_prio_enqueue (tp, &q_ready);
-  chx_spin_unlock (&q_ready.lock);
-}
-
-static void __attribute__((naked, used))
-idle (void)
-{
-#if defined(USE_WFI_FOR_IDLE)
-  for (;;)
-    asm volatile ("wfi" : : : "memory");
-#else
-  for (;;);
-#endif
-}
-
 
 /* Registers on stack (PSP): r0, r1, r2, r3, r12, lr, pc, xpsr.
    v7a uses an additional area on the thread for those registers.  */
@@ -959,6 +643,325 @@ svc (void)
 
   asm volatile ("b	sched"
 		: /* no output */: /* no input */ : "memory");
+}
+
+/**
+ * chx_fatal - Fatal error point.
+ * @err_code: Error code
+ *
+ * When it detects a coding error, this function will be called to
+ * stop further execution of code.  It never returns.
+ */
+void
+chx_fatal (uint32_t err_code)
+{
+  (void)err_code;
+  for (;;);
+}
+
+
+/* RUNNING: the current thread. */
+#if defined(__ARM_ARCH_7A__)
+static inline int
+core_id (void)
+{
+  int i;
+  asm ("mrc	p15, 0, %0, c0, c0, 5\n" : "=r" (i));
+  return i & 3;
+}
+
+#define MAX_CORE 4
+struct chx_thread *runnings[MAX_CORE];
+#define running runnings[core_id ()]
+struct chx_spinlock runnings_lock;
+#else
+struct chx_thread *running;
+#endif
+
+/* Double linked list operations.  */
+struct chx_dll {
+  struct chx_thread *next, *prev;
+};
+
+
+struct chx_queue {
+  struct chx_thread *next, *prev;
+  struct chx_spinlock lock;
+};
+
+/* READY: priority queue. */
+static struct chx_queue q_ready;
+
+/* Queue of threads waiting for timer.  */
+static struct chx_queue q_timer;
+
+/* Queue of threads which have been exited. */
+static struct chx_queue q_exit;
+
+/* Queue of threads which wait exit of some thread.  */
+static struct chx_queue q_join;
+
+
+/* Forward declaration(s). */
+static void chx_request_preemption (uint16_t prio);
+static void chx_timer_dequeue (struct chx_thread *tp);
+static void chx_timer_insert (struct chx_thread *tp, uint32_t usec);
+
+
+
+/**************/
+static void chx_spin_lock (struct chx_spinlock *lk)
+{
+#if defined(__ARM_ARCH_7A__)
+  uint32_t val, nak = 1;
+  do {
+    asm volatile ("ldrex %0, [%1]\n\t" : "=r" (val) : "r" (&lk->value));
+    if (val != 0)
+      asm volatile ("wfe");
+    else
+      asm volatile ("strex %0, %1, [%2]\n\t"
+		    : "=r" (nak) : "r" (1), "r" (&lk->value) : "memory" );
+  } while (nak);
+  asm volatile ("dmb");
+#else
+  (void)lk;
+#endif
+}
+
+static void chx_spin_unlock (struct chx_spinlock *lk)
+{
+#if defined(__ARM_ARCH_7A__)
+  asm volatile ("dmb");
+  lk->value = 0;
+  asm volatile ("dsb");
+  asm volatile ("sev");
+#else
+  (void)lk;
+#endif
+}
+
+/* The thread context: specific to ARM Cortex-M3 now.  */
+struct tcontext {
+  uint32_t reg[9];	   /* r4, r5, r6, r7, r8, r9, r10, r11, r13 */
+#if defined(__ARM_ARCH_7A__) && defined(__ARM_NEON__)
+  /* uint64_t field gives 8-byte align to tcontext itself.  Add
+     fpad so to avoid implicit padding after tcontext in chx_thread. */
+  uint32_t fpexc;
+  uint64_t dreg[32];	/* d0-d31 */
+  uint32_t fpscr;
+  uint32_t fpad;
+#endif
+};
+
+/* Saved registers on the stack.  */
+struct chx_stack_regs {
+  uint32_t reg[8];	       /* r0, r1, r2, r3, r12, lr, pc, xpsr */
+};
+
+/*
+ * Constants for ARM.
+ */
+#define REG_EXIT 4		/* R8 */
+#define REG_SP 8
+
+#define REG_R0   0
+#define REG_LR   5
+#define REG_PC   6
+#define REG_XPSR 7
+
+#if defined(__ARM_ARCH_7A__)
+#define INITIAL_XPSR 0x0000003f	/* T=1 sys */
+#else
+#define INITIAL_XPSR 0x01000000	/* T=1 */
+#endif
+
+/**************/
+
+struct chx_thread {
+  struct chx_thread *next, *prev;
+  struct tcontext tc;
+  uint32_t state            : 4;
+  uint32_t flag_detached    : 1;
+  uint32_t flag_got_cancel  : 1;
+  uint32_t flag_join_req    : 1;
+  uint32_t flag_sched_rr    : 1;
+  uint32_t                  : 8;
+  uint32_t prio_orig        : 8;
+  uint32_t prio             : 8;
+#if defined(__ARM_ARCH_7A__)
+  struct chx_stack_regs stc;
+#endif
+  uint32_t v;
+  struct chx_mtx *mutex_list;
+  struct chx_cleanup *clp;
+};
+
+
+static void
+chx_cpu_sched_lock (void)
+{
+  if (running->prio < CHOPSTX_PRIO_INHIBIT_PREEMPTION)
+    {
+#if defined(__ARM_ARCH_6M__)
+      asm volatile ("cpsid	i" : : : "memory");
+#elif defined(__ARM_ARCH_7A__)
+      asm volatile ("cpsid	i" : : : "memory");
+#else
+      register uint32_t tmp = CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED;
+      asm volatile ("msr	BASEPRI, %0" : : "r" (tmp) : "memory");
+#endif
+    }
+}
+
+static void
+chx_cpu_sched_unlock (void)
+{
+  if (running->prio < CHOPSTX_PRIO_INHIBIT_PREEMPTION)
+    {
+#if defined(__ARM_ARCH_6M__)
+      asm volatile ("cpsie	i" : : : "memory");
+#elif defined(__ARM_ARCH_7A__)
+      asm volatile ("cpsie	i" : : : "memory");
+#else
+      register uint32_t tmp = CPU_EXCEPTION_PRIORITY_CLEAR;
+      asm volatile ("msr	BASEPRI, %0" : : "r" (tmp) : "memory");
+#endif
+    }
+}
+
+
+/*
+ * Double linked list handling.
+ */
+
+static int
+ll_empty (void *head)
+{
+  struct chx_thread *l = (struct chx_thread *)head;
+
+  return (struct chx_thread *)l == l->next;
+}
+
+static struct chx_thread *
+ll_dequeue (struct chx_thread *tp)
+{
+  tp->next->prev = tp->prev;
+  tp->prev->next = tp->next;
+  tp->prev = tp->next = tp;
+  return tp;
+}
+
+static void
+ll_insert (struct chx_thread *tp0, void *head)
+{
+  struct chx_thread *tp = (struct chx_thread *)head;
+
+  tp0->next = tp;
+  tp0->prev = tp->prev;
+  tp->prev->next = tp0;
+  tp->prev = tp0;
+}
+
+
+static struct chx_thread *
+ll_pop (void *head)
+{
+  struct chx_thread *l = (struct chx_thread *)head;
+  struct chx_thread *tp0 = l->next;
+
+  if (tp0 == l)
+    return NULL;
+
+  return ll_dequeue (tp0);
+}
+
+static void
+ll_prio_push (struct chx_thread *tp0, void *head)
+{
+  struct chx_thread *l = (struct chx_thread *)head;
+  struct chx_thread *tp;
+
+  for (tp = l->next; tp != l; tp = tp->next)
+    if (tp->prio <= tp0->prio)
+      break;
+
+  ll_insert (tp0, tp);
+}
+
+static void
+ll_prio_enqueue (struct chx_thread *tp0, void *head)
+{
+  struct chx_thread *l = (struct chx_thread *)head;
+  struct chx_thread *tp;
+
+  for (tp = l->next; tp != l; tp = tp->next)
+    if (tp->prio < tp0->prio)
+      break;
+
+  ll_insert (tp0, tp);
+}
+
+
+/*
+ * Thread status.
+ */
+enum  {
+  THREAD_RUNNING=0,
+  THREAD_READY,
+  THREAD_WAIT_MTX,
+  THREAD_WAIT_CND,
+  THREAD_WAIT_TIME,
+  THREAD_WAIT_INT,
+  THREAD_JOIN,
+  /**/
+  THREAD_EXITED=0x0E,
+  THREAD_FINISHED=0x0F
+};
+
+
+static struct chx_thread *
+chx_ready_pop (void)
+{
+  struct chx_thread *tp;
+
+  chx_spin_lock (&q_ready.lock);
+  tp = ll_pop (&q_ready);
+  if (tp)
+    tp->state = THREAD_RUNNING;
+  chx_spin_unlock (&q_ready.lock);
+
+  return tp;
+}
+
+
+static void
+chx_ready_push (struct chx_thread *tp)
+{
+  chx_spin_lock (&q_ready.lock);
+  tp->state = THREAD_READY;
+  ll_prio_push (tp, &q_ready);
+  chx_spin_unlock (&q_ready.lock);
+}
+
+
+static void
+chx_ready_enqueue (struct chx_thread *tp)
+{
+  chx_spin_lock (&q_ready.lock);
+  tp->state = THREAD_READY;
+  ll_prio_enqueue (tp, &q_ready);
+  chx_spin_unlock (&q_ready.lock);
+}
+
+static void __attribute__((naked, used))
+idle (void)
+{
+#if defined(USE_WFI_FOR_IDLE)
+  for (;;)
+    asm volatile ("wfi" : : : "memory");
+#else
+  for (;;);
+#endif
 }
 
 
