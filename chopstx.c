@@ -93,7 +93,7 @@
 /*
  * Lower layer architecture specific functions.
  *
- * system tick, interrupt, and exception handlings.
+ * system tick and interrupt
  */
 
 /*
@@ -278,372 +278,6 @@ chx_prio_init (void)
 	    | (CPU_EXCEPTION_PRIORITY_PENDSV << 16));
 }
 #endif
-
-/*
- * Exception Handling
- */
-
-/* Registers on stack (PSP): r0, r1, r2, r3, r12, lr, pc, xpsr.
-   v7a uses an additional area on the thread for those registers.  */
-static void __attribute__ ((naked, used))
-sched (void)
-{
-  register struct chx_thread *tp asm ("r0");
-
-  tp = chx_ready_pop ();
-  if (tp && tp->flag_sched_rr)
-    {
-      chx_spin_lock (&q_timer.lock);
-      chx_timer_insert (tp, PREEMPTION_USEC);
-      chx_spin_unlock (&q_timer.lock);
-    }
-  asm volatile (/* Now, r0 points to the thread to be switched.  */
-		/* Put it to *running.  */
-#if defined(__ARM_ARCH_7A__)
-		"mrc	p15, 0, r2, c0, c0, 5\n\t"
-		"and	r2, r2, #3\n\t"
-		"ldr	r1, =runnings\n\t"
-		/* Update running.  */
-		"str	r0, [r1, r2, lsl #2]\n\t"
-		"ldr	r1, =runnings_lock\n"
-		"mov	r2, #0\n\t"
-		"dmb\n\t"
-		"str	r2, [r1]\n\t"
-		"dsb\n\t"
-		"sev\n\t"
-#else
-		"ldr	r1, =running\n\t"
-		/* Update running.  */
-		"str	r0, [r1]\n\t"
-#endif
-#if defined(__ARM_ARCH_6M__)
-		"cmp	r0, #0\n\t"
-		"beq	1f\n\t"
-#else
-		"cbz	r0, 1f\n\t"
-#endif
-		/**/
-		"add	r0, #8\n\t"
-		"ldm	r0!, {r4, r5, r6, r7}\n\t"
-#if defined(__ARM_ARCH_6M__)
-		"ldm	r0!, {r1, r2, r3}\n\t"
-		"mov	r8, r1\n\t"
-		"mov	r9, r2\n\t"
-		"mov	r10, r3\n\t"
-		"ldm	r0!, {r1, r2}\n\t"
-		"mov	r11, r1\n\t"
-		"msr	PSP, r2\n\t"
-#elif defined(__ARM_ARCH_7A__)
-		"ldr	r8, [r0], #4\n\t"
-		"ldr	r9, [r0], #4\n\t"
-		"ldr	r10, [r0], #4\n\t"
-		"ldr	r11, [r0], #4\n\t"
-		"ldr	r1, [r0], #4\n\t"
-		"msr	SP_usr, r1\n\t"
-# if defined(__ARM_NEON__)
-		"ldr	r2, [r0], #4\n\t"
-		"mov	r1, #(1<<30)\n\t"
-		"vmsr	fpexc, r1\n\t"
-		"vldmia.64 r0!,{d0-d15}\n\t"
-		"vldmia.64 r0!,{d16-d31}\n\t"
-		"ldr	r1, [r0], #8\n\t"
-		"vmsr	fpscr, r1\n\t"
-		"vmsr	fpexc, r2\n\t"
-# endif
-#else
-		"ldr	r8, [r0], #4\n\t"
-		"ldr	r9, [r0], #4\n\t"
-		"ldr	r10, [r0], #4\n\t"
-		"ldr	r11, [r0], #4\n\t"
-		"ldr	r1, [r0], #4\n\t"
-		"msr	PSP, r1\n\t"
-#endif
-		"ldrb	r1, [r0, #3]\n\t" /* ->PRIO field.  */
-#if defined(__ARM_ARCH_7A__)
-		"add	r0, r0, #4\n\t"
-		"ldr	r2, [r0, #7*4]\n\t"
-		"orr	r2, r2, #128\n\t"
-#endif
-		"cmp	r1, #247\n\t"
-		"bhi	0f\n\t"	/* Leave interrupt disabled if >= 248 */
-		/**/
-		/* Unmask interrupts.  */
-#if defined(__ARM_ARCH_7A__)
-		"bic	r2, r2, #128\n"
-#else
-		"mov	r0, #0\n\t"
-#if defined(__ARM_ARCH_6M__)
-		"cpsie	i\n"
-#else
-		"msr	BASEPRI, r0\n"
-#endif
-#endif
-		/**/
-	"0:\n\t"
-#if defined(__ARM_ARCH_7A__)
-		/* r2: New spsr */
-		"ldr	r1, [r0, #5*4]\n\t"
-		"msr	LR_usr, r1\n\t"
-		"mov	r12, r0\n\t"
-		"sub	sp, sp, #8\n\t"
-		"ldr	r0, [r12, #6*4]\n\t"
-		"str	r2, [sp, #4]\n\t"
-		"str	r0, [sp]\n\t"
-		"ldm	r12!, {r0-r3}\n\t"
-		"ldr	r12, [r12]\n\t"
-		"rfe	sp!\n"
-#else
-		"sub	r0, #3\n\t" /* EXC_RETURN to a thread with PSP */
-		"bx	r0\n"
-#endif
-	"1:\n\t"
-		/* Spawn an IDLE thread.  */
-		"ldr	r0, =__main_stack_end__\n\t"
-#if defined(__ARM_ARCH_7A__)
-		"msr	SP_usr, r0\n\t"
-#else
-		"msr	MSP, r0\n\t"
-#endif
-		"mov	r0, #0\n\t"
-		"mov	r1, #0\n\t"
-#if defined(__ARM_ARCH_7A__)
-		"msr	LR_usr, r1\n\t"
-#endif
-		"ldr	r2, =idle\n\t"	     /* PC = idle */
-#if defined(__ARM_ARCH_6M__)
-		"mov	r3, #0x010\n\t"
-		"lsl	r3, r3, #20\n\t" /* xPSR = T-flag set (Thumb) */
-#elif defined(__ARM_ARCH_7A__)
-		"movw	r3, #0x003f\n\t" /* xPSR = T-flag set + sys */
-#else
-		"mov	r3, #0x01000000\n\t" /* xPSR = T-flag set (Thumb) */
-#endif
-		"push	{r0, r1, r2, r3}\n\t"
-		"mov	r0, #0\n\t"
-		"mov	r1, #0\n\t"
-		"mov	r2, #0\n\t"
-		"mov	r3, #0\n\t"
-		"push	{r0, r1, r2, r3}\n"
-		/**/
-		/* Unmask interrupts.  */
-		"mov	r0, #0\n\t"
-#if defined(__ARM_ARCH_6M__)
-		"cpsie	i\n\t"
-#elif defined(__ARM_ARCH_7A__)
-		/* Nothing to do */
-#else
-		"msr	BASEPRI, r0\n\t"
-#endif
-		/**/
-#if defined(__ARM_ARCH_7A__)
-		"ldm	sp!, {r0-r3}\n\t"
-		"ldr	r12, [sp], #8\n\t"
-		"rfe	sp!\n"
-#else
-		"sub	r0, #7\n\t" /* EXC_RETURN to a thread with MSP */
-		"bx	r0\n"
-#endif
-		: /* no output */ : "r" (tp) : "memory");
-}
-
-void __attribute__ ((naked))
-preempt (void)
-{
-  register struct chx_thread *tp asm ("r0");
-  tp = (struct chx_thread *)CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED;
-
-  asm (
-#if defined(__ARM_ARCH_6M__)
-       "cpsid	i\n\t"
-#elif defined(__ARM_ARCH_7A__)
-       "cpsid	i\n\t"
-       "ldr	r1, =runnings_lock\n"
-  "0:\n\t"
-       "ldrex	r2, [r1]\n\t"
-       "cmp	r2, #0\n\t"
-       "itee	ne\n\t"
-       "wfene\n\t"
-       "strexeq	r2, r0, [r1]\n\t"
-       "cmpeq	r2, #0\n\t"
-       "bne	0b\n\t"
-       "dmb\n\t"
-#else
-       "msr	BASEPRI, r0\n\t"
-#endif
-#if defined(__ARM_ARCH_7A__)
-       "mrc	p15, 0, r2, c0, c0, 5\n\t"
-       "and	r2, r2, #3\n\t"
-       "ldr	r1, =runnings\n\t"
-       "ldr	r0, [r1, r2, lsl #2]\n\t"
-#else
-       "ldr	r1, =running\n\t"
-       "ldr	r0, [r1]\n\t"
-#endif
-#if defined(__ARM_ARCH_6M__)
-       "cmp	r0, #0\n\t"
-       "bne	0f\n\t"
-#else
-       "cbnz	r0, 0f\n\t"
-#endif
-       /* It's idle which was preempted.  Discard saved registers on stack.  */
-#if defined(__ARM_ARCH_7A__)
-       "add	sp, sp, #32\n\t"
-#else
-       "ldr	r1, =__main_stack_end__\n\t"
-       "msr	MSP, r1\n\t"
-#endif
-       "b	sched\n"
-  "0:\n\t"
-#if defined(__ARM_ARCH_6M__)
-       "add	r1, r0, #4\n\t"
-       "add	r1, #4\n\t"
-#else
-       "add	r1, r0, #8\n\t"
-#endif
-       /* Save registers onto CHX_THREAD struct.  */
-       "stm	r1!, {r4, r5, r6, r7}\n\t"
-       "mov	r2, r8\n\t"
-       "mov	r3, r9\n\t"
-       "mov	r4, r10\n\t"
-       "mov	r5, r11\n\t"
-#if defined(__ARM_ARCH_7A__)
-       "mrs	r6, SP_usr\n\t"
-       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
-# if defined(__ARM_NEON__)
-       "vmrs	r2, fpexc\n\t"
-       "str	r2, [r1], #4\n\t"
-       "mov	r2, #(1<<30)\n\t"
-       "vmsr	fpexc, r2\n\t"
-       "vstmia.64 r1!,{d0-d15}\n\t"
-       "vstmia.64 r1!,{d16-d31}\n\t"
-       "vmrs	r2, fpscr\n\t"
-       "str	r2, [r1], #8\n\t"
-# endif
-       "add	r6, r1, #4\n\t"
-       /* Copy saved registers on SP_svc to tp->stc.  */
-       "ldm	sp!, {r1, r3, r4, r5}\n\t"
-       "stm	r6!, {r1, r3, r4, r5}\n\t"
-       "ldm	sp!, {r2, r3, r4, r5}\n\t"
-       "stm	r6!, {r2, r3, r4, r5}"
-#else
-       "mrs	r6, PSP\n\t" /* r13(=SP) in user space.  */
-       "stm	r1!, {r2, r3, r4, r5, r6}"
-#endif
-       : "=r" (tp)
-       : "r" (tp)
-       : "r1", "r2", "r3", "r4", "r5", "r6", "cc", "memory");
-
-  if (tp)
-    {
-      if (tp->flag_sched_rr)
-	{
-	  if (tp->state == THREAD_RUNNING)
-	    {
-	      chx_timer_dequeue (tp);
-	      chx_ready_enqueue (tp);
-	    }
-	  /*
-	   * It may be THREAD_READY after chx_timer_expired.
-	   * Then, do nothing.
-	   */
-	}
-      else
-	chx_ready_push (tp);
-      running = NULL;
-    }
-
-  asm volatile ("b	sched"
-		: /* no output */: /* no input */ : "memory");
-}
-
-
-/*
- * System call: switch to another thread.
- * There are two cases:
- *   ORIG_R0=0 (SLEEP): Current RUNNING thread is already connected to
- *                      something (mutex, cond, intr, etc.)
- *   ORIG_R0=1 (YIELD): Current RUNNING thread is active,
- *                      it is needed to be enqueued to READY queue.
- */
-void __attribute__ ((naked))
-svc (void)
-{
-  register struct chx_thread *tp asm ("r0");
-  register uint32_t orig_r0 asm ("r1");
-
-  asm (/* Get running.  */
-#if defined(__ARM_ARCH_7A__)
-       /* Get spin lock before running.  */
-       "mov	r0, #1\n\t"
-       "ldr	r1, =runnings_lock\n"
-  "0:\n\t"
-       "ldrex	r2, [r1]\n\t"
-       "cmp	r2, #0\n\t"
-       "itee	ne\n\t"
-       "wfene\n\t"
-       "strexeq	r2, r0, [r1]\n\t"
-       "cmpeq	r2, #0\n\t"
-       "bne	0b\n\t"
-       "dmb\n\t"
-       "mrc	p15, 0, r2, c0, c0, 5\n\t"
-       "and	r2, r2, #3\n\t"
-       "ldr	r1, =runnings\n\t"
-       "ldr	r0, [r1, r2, lsl #2]\n\t"
-#else
-       "ldr	r1, =running\n\t"
-       "ldr	r0, [r1]\n\t"
-#endif
-#if defined(__ARM_ARCH_6M__)
-       "add	r1, r0, #4\n\t"
-       "add	r1, #4\n\t"
-#else
-       "add	r1, r0, #8\n\t"
-#endif
-       /* Save registers onto CHX_THREAD struct.  */
-       "stm	r1!, {r4, r5, r6, r7}\n\t"
-       "mov	r2, r8\n\t"
-       "mov	r3, r9\n\t"
-       "mov	r4, r10\n\t"
-       "mov	r5, r11\n\t"
-#if defined(__ARM_ARCH_7A__)
-       "mrs	r6, SP_usr\n\t"
-       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
-# if defined(__ARM_NEON__)
-       "vmrs	r2, fpexc\n\t"
-       "str	r2, [r1], #4\n\t"
-       "mov	r2, #(1<<30)\n\t"
-       "vmsr	fpexc, r2\n\t"
-       "vstmia.64 r1!,{d0-d15}\n\t"
-       "vstmia.64 r1!,{d16-d31}\n\t"
-       "vmrs	r2, fpscr\n\t"
-       "str	r2, [r1], #8\n\t"
-# endif
-       "add	r6, r1, #4\n\t"
-       /* Copy saved registers on SP_svc to tp->stc.  */
-       "ldm	sp!, {r1, r3, r4, r5}\n\t"
-       "stm	r6!, {r1, r3, r4, r5}\n\t"
-       "ldm	sp!, {r2, r3, r4, r5}\n\t"
-       "stm	r6!, {r2, r3, r4, r5}"
-#else
-       "mrs	r6, PSP\n\t" /* r13(=SP) in user space.  */
-       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
-       "ldr	r1, [r6]"
-#endif
-       : "=r" (tp), "=r" (orig_r0)
-       : /* no input */
-       : "r2", "r3", "r4", "r5", "r6", "memory");
-
-  if (orig_r0)			/* yield */
-    {
-      if (tp->flag_sched_rr)
-	chx_timer_dequeue (tp);
-      chx_ready_enqueue (tp);
-      running = NULL;
-    }
-
-  asm volatile ("b	sched"
-		: /* no output */: /* no input */ : "memory");
-}
 
 /**
  * chx_fatal - Fatal error point.
@@ -1121,7 +755,7 @@ chx_handle_intr (void)
 void
 chx_systick_init (void)
 {
-  chx_systic_reset ();
+  chx_systick_reset ();
 
   if ((CHX_FLAGS_MAIN & CHOPSTX_SCHED_RR))
     {
@@ -1972,4 +1606,371 @@ chopstx_testcancel (void)
 {
   if (running->flag_got_cancel)
     chopstx_exit ((void *)CHOPSTX_EXIT_CANCELED_IN_SYNC);
+}
+
+/*
+ * Lower layer architecture specific exception handling entries.
+ * 
+ */
+
+/* Registers on stack (PSP): r0, r1, r2, r3, r12, lr, pc, xpsr.
+   v7a uses an additional area on the thread for those registers.  */
+static void __attribute__ ((naked, used))
+sched (void)
+{
+  register struct chx_thread *tp asm ("r0");
+
+  tp = chx_ready_pop ();
+  if (tp && tp->flag_sched_rr)
+    {
+      chx_spin_lock (&q_timer.lock);
+      chx_timer_insert (tp, PREEMPTION_USEC);
+      chx_spin_unlock (&q_timer.lock);
+    }
+  asm volatile (/* Now, r0 points to the thread to be switched.  */
+		/* Put it to *running.  */
+#if defined(__ARM_ARCH_7A__)
+		"mrc	p15, 0, r2, c0, c0, 5\n\t"
+		"and	r2, r2, #3\n\t"
+		"ldr	r1, =runnings\n\t"
+		/* Update running.  */
+		"str	r0, [r1, r2, lsl #2]\n\t"
+		"ldr	r1, =runnings_lock\n"
+		"mov	r2, #0\n\t"
+		"dmb\n\t"
+		"str	r2, [r1]\n\t"
+		"dsb\n\t"
+		"sev\n\t"
+#else
+		"ldr	r1, =running\n\t"
+		/* Update running.  */
+		"str	r0, [r1]\n\t"
+#endif
+#if defined(__ARM_ARCH_6M__)
+		"cmp	r0, #0\n\t"
+		"beq	1f\n\t"
+#else
+		"cbz	r0, 1f\n\t"
+#endif
+		/**/
+		"add	r0, #8\n\t"
+		"ldm	r0!, {r4, r5, r6, r7}\n\t"
+#if defined(__ARM_ARCH_6M__)
+		"ldm	r0!, {r1, r2, r3}\n\t"
+		"mov	r8, r1\n\t"
+		"mov	r9, r2\n\t"
+		"mov	r10, r3\n\t"
+		"ldm	r0!, {r1, r2}\n\t"
+		"mov	r11, r1\n\t"
+		"msr	PSP, r2\n\t"
+#elif defined(__ARM_ARCH_7A__)
+		"ldr	r8, [r0], #4\n\t"
+		"ldr	r9, [r0], #4\n\t"
+		"ldr	r10, [r0], #4\n\t"
+		"ldr	r11, [r0], #4\n\t"
+		"ldr	r1, [r0], #4\n\t"
+		"msr	SP_usr, r1\n\t"
+# if defined(__ARM_NEON__)
+		"ldr	r2, [r0], #4\n\t"
+		"mov	r1, #(1<<30)\n\t"
+		"vmsr	fpexc, r1\n\t"
+		"vldmia.64 r0!,{d0-d15}\n\t"
+		"vldmia.64 r0!,{d16-d31}\n\t"
+		"ldr	r1, [r0], #8\n\t"
+		"vmsr	fpscr, r1\n\t"
+		"vmsr	fpexc, r2\n\t"
+# endif
+#else
+		"ldr	r8, [r0], #4\n\t"
+		"ldr	r9, [r0], #4\n\t"
+		"ldr	r10, [r0], #4\n\t"
+		"ldr	r11, [r0], #4\n\t"
+		"ldr	r1, [r0], #4\n\t"
+		"msr	PSP, r1\n\t"
+#endif
+		"ldrb	r1, [r0, #3]\n\t" /* ->PRIO field.  */
+#if defined(__ARM_ARCH_7A__)
+		"add	r0, r0, #4\n\t"
+		"ldr	r2, [r0, #7*4]\n\t"
+		"orr	r2, r2, #128\n\t"
+#endif
+		"cmp	r1, #247\n\t"
+		"bhi	0f\n\t"	/* Leave interrupt disabled if >= 248 */
+		/**/
+		/* Unmask interrupts.  */
+#if defined(__ARM_ARCH_7A__)
+		"bic	r2, r2, #128\n"
+#else
+		"mov	r0, #0\n\t"
+#if defined(__ARM_ARCH_6M__)
+		"cpsie	i\n"
+#else
+		"msr	BASEPRI, r0\n"
+#endif
+#endif
+		/**/
+	"0:\n\t"
+#if defined(__ARM_ARCH_7A__)
+		/* r2: New spsr */
+		"ldr	r1, [r0, #5*4]\n\t"
+		"msr	LR_usr, r1\n\t"
+		"mov	r12, r0\n\t"
+		"sub	sp, sp, #8\n\t"
+		"ldr	r0, [r12, #6*4]\n\t"
+		"str	r2, [sp, #4]\n\t"
+		"str	r0, [sp]\n\t"
+		"ldm	r12!, {r0-r3}\n\t"
+		"ldr	r12, [r12]\n\t"
+		"rfe	sp!\n"
+#else
+		"sub	r0, #3\n\t" /* EXC_RETURN to a thread with PSP */
+		"bx	r0\n"
+#endif
+	"1:\n\t"
+		/* Spawn an IDLE thread.  */
+		"ldr	r0, =__main_stack_end__\n\t"
+#if defined(__ARM_ARCH_7A__)
+		"msr	SP_usr, r0\n\t"
+#else
+		"msr	MSP, r0\n\t"
+#endif
+		"mov	r0, #0\n\t"
+		"mov	r1, #0\n\t"
+#if defined(__ARM_ARCH_7A__)
+		"msr	LR_usr, r1\n\t"
+#endif
+		"ldr	r2, =idle\n\t"	     /* PC = idle */
+#if defined(__ARM_ARCH_6M__)
+		"mov	r3, #0x010\n\t"
+		"lsl	r3, r3, #20\n\t" /* xPSR = T-flag set (Thumb) */
+#elif defined(__ARM_ARCH_7A__)
+		"movw	r3, #0x003f\n\t" /* xPSR = T-flag set + sys */
+#else
+		"mov	r3, #0x01000000\n\t" /* xPSR = T-flag set (Thumb) */
+#endif
+		"push	{r0, r1, r2, r3}\n\t"
+		"mov	r0, #0\n\t"
+		"mov	r1, #0\n\t"
+		"mov	r2, #0\n\t"
+		"mov	r3, #0\n\t"
+		"push	{r0, r1, r2, r3}\n"
+		/**/
+		/* Unmask interrupts.  */
+		"mov	r0, #0\n\t"
+#if defined(__ARM_ARCH_6M__)
+		"cpsie	i\n\t"
+#elif defined(__ARM_ARCH_7A__)
+		/* Nothing to do */
+#else
+		"msr	BASEPRI, r0\n\t"
+#endif
+		/**/
+#if defined(__ARM_ARCH_7A__)
+		"ldm	sp!, {r0-r3}\n\t"
+		"ldr	r12, [sp], #8\n\t"
+		"rfe	sp!\n"
+#else
+		"sub	r0, #7\n\t" /* EXC_RETURN to a thread with MSP */
+		"bx	r0\n"
+#endif
+		: /* no output */ : "r" (tp) : "memory");
+}
+
+void __attribute__ ((naked))
+preempt (void)
+{
+  register struct chx_thread *tp asm ("r0");
+  tp = (struct chx_thread *)CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED;
+
+  asm (
+#if defined(__ARM_ARCH_6M__)
+       "cpsid	i\n\t"
+#elif defined(__ARM_ARCH_7A__)
+       "cpsid	i\n\t"
+       "ldr	r1, =runnings_lock\n"
+  "0:\n\t"
+       "ldrex	r2, [r1]\n\t"
+       "cmp	r2, #0\n\t"
+       "itee	ne\n\t"
+       "wfene\n\t"
+       "strexeq	r2, r0, [r1]\n\t"
+       "cmpeq	r2, #0\n\t"
+       "bne	0b\n\t"
+       "dmb\n\t"
+#else
+       "msr	BASEPRI, r0\n\t"
+#endif
+#if defined(__ARM_ARCH_7A__)
+       "mrc	p15, 0, r2, c0, c0, 5\n\t"
+       "and	r2, r2, #3\n\t"
+       "ldr	r1, =runnings\n\t"
+       "ldr	r0, [r1, r2, lsl #2]\n\t"
+#else
+       "ldr	r1, =running\n\t"
+       "ldr	r0, [r1]\n\t"
+#endif
+#if defined(__ARM_ARCH_6M__)
+       "cmp	r0, #0\n\t"
+       "bne	0f\n\t"
+#else
+       "cbnz	r0, 0f\n\t"
+#endif
+       /* It's idle which was preempted.  Discard saved registers on stack.  */
+#if defined(__ARM_ARCH_7A__)
+       "add	sp, sp, #32\n\t"
+#else
+       "ldr	r1, =__main_stack_end__\n\t"
+       "msr	MSP, r1\n\t"
+#endif
+       "b	sched\n"
+  "0:\n\t"
+#if defined(__ARM_ARCH_6M__)
+       "add	r1, r0, #4\n\t"
+       "add	r1, #4\n\t"
+#else
+       "add	r1, r0, #8\n\t"
+#endif
+       /* Save registers onto CHX_THREAD struct.  */
+       "stm	r1!, {r4, r5, r6, r7}\n\t"
+       "mov	r2, r8\n\t"
+       "mov	r3, r9\n\t"
+       "mov	r4, r10\n\t"
+       "mov	r5, r11\n\t"
+#if defined(__ARM_ARCH_7A__)
+       "mrs	r6, SP_usr\n\t"
+       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
+# if defined(__ARM_NEON__)
+       "vmrs	r2, fpexc\n\t"
+       "str	r2, [r1], #4\n\t"
+       "mov	r2, #(1<<30)\n\t"
+       "vmsr	fpexc, r2\n\t"
+       "vstmia.64 r1!,{d0-d15}\n\t"
+       "vstmia.64 r1!,{d16-d31}\n\t"
+       "vmrs	r2, fpscr\n\t"
+       "str	r2, [r1], #8\n\t"
+# endif
+       "add	r6, r1, #4\n\t"
+       /* Copy saved registers on SP_svc to tp->stc.  */
+       "ldm	sp!, {r1, r3, r4, r5}\n\t"
+       "stm	r6!, {r1, r3, r4, r5}\n\t"
+       "ldm	sp!, {r2, r3, r4, r5}\n\t"
+       "stm	r6!, {r2, r3, r4, r5}"
+#else
+       "mrs	r6, PSP\n\t" /* r13(=SP) in user space.  */
+       "stm	r1!, {r2, r3, r4, r5, r6}"
+#endif
+       : "=r" (tp)
+       : "r" (tp)
+       : "r1", "r2", "r3", "r4", "r5", "r6", "cc", "memory");
+
+  if (tp)
+    {
+      if (tp->flag_sched_rr)
+	{
+	  if (tp->state == THREAD_RUNNING)
+	    {
+	      chx_timer_dequeue (tp);
+	      chx_ready_enqueue (tp);
+	    }
+	  /*
+	   * It may be THREAD_READY after chx_timer_expired.
+	   * Then, do nothing.
+	   */
+	}
+      else
+	chx_ready_push (tp);
+      running = NULL;
+    }
+
+  asm volatile ("b	sched"
+		: /* no output */: /* no input */ : "memory");
+}
+
+
+/*
+ * System call: switch to another thread.
+ * There are two cases:
+ *   ORIG_R0=0 (SLEEP): Current RUNNING thread is already connected to
+ *                      something (mutex, cond, intr, etc.)
+ *   ORIG_R0=1 (YIELD): Current RUNNING thread is active,
+ *                      it is needed to be enqueued to READY queue.
+ */
+void __attribute__ ((naked))
+svc (void)
+{
+  register struct chx_thread *tp asm ("r0");
+  register uint32_t orig_r0 asm ("r1");
+
+  asm (/* Get running.  */
+#if defined(__ARM_ARCH_7A__)
+       /* Get spin lock before running.  */
+       "mov	r0, #1\n\t"
+       "ldr	r1, =runnings_lock\n"
+  "0:\n\t"
+       "ldrex	r2, [r1]\n\t"
+       "cmp	r2, #0\n\t"
+       "itee	ne\n\t"
+       "wfene\n\t"
+       "strexeq	r2, r0, [r1]\n\t"
+       "cmpeq	r2, #0\n\t"
+       "bne	0b\n\t"
+       "dmb\n\t"
+       "mrc	p15, 0, r2, c0, c0, 5\n\t"
+       "and	r2, r2, #3\n\t"
+       "ldr	r1, =runnings\n\t"
+       "ldr	r0, [r1, r2, lsl #2]\n\t"
+#else
+       "ldr	r1, =running\n\t"
+       "ldr	r0, [r1]\n\t"
+#endif
+#if defined(__ARM_ARCH_6M__)
+       "add	r1, r0, #4\n\t"
+       "add	r1, #4\n\t"
+#else
+       "add	r1, r0, #8\n\t"
+#endif
+       /* Save registers onto CHX_THREAD struct.  */
+       "stm	r1!, {r4, r5, r6, r7}\n\t"
+       "mov	r2, r8\n\t"
+       "mov	r3, r9\n\t"
+       "mov	r4, r10\n\t"
+       "mov	r5, r11\n\t"
+#if defined(__ARM_ARCH_7A__)
+       "mrs	r6, SP_usr\n\t"
+       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
+# if defined(__ARM_NEON__)
+       "vmrs	r2, fpexc\n\t"
+       "str	r2, [r1], #4\n\t"
+       "mov	r2, #(1<<30)\n\t"
+       "vmsr	fpexc, r2\n\t"
+       "vstmia.64 r1!,{d0-d15}\n\t"
+       "vstmia.64 r1!,{d16-d31}\n\t"
+       "vmrs	r2, fpscr\n\t"
+       "str	r2, [r1], #8\n\t"
+# endif
+       "add	r6, r1, #4\n\t"
+       /* Copy saved registers on SP_svc to tp->stc.  */
+       "ldm	sp!, {r1, r3, r4, r5}\n\t"
+       "stm	r6!, {r1, r3, r4, r5}\n\t"
+       "ldm	sp!, {r2, r3, r4, r5}\n\t"
+       "stm	r6!, {r2, r3, r4, r5}"
+#else
+       "mrs	r6, PSP\n\t" /* r13(=SP) in user space.  */
+       "stm	r1!, {r2, r3, r4, r5, r6}\n\t"
+       "ldr	r1, [r6]"
+#endif
+       : "=r" (tp), "=r" (orig_r0)
+       : /* no input */
+       : "r2", "r3", "r4", "r5", "r6", "memory");
+
+  if (orig_r0)			/* yield */
+    {
+      if (tp->flag_sched_rr)
+	chx_timer_dequeue (tp);
+      chx_ready_enqueue (tp);
+      running = NULL;
+    }
+
+  asm volatile ("b	sched"
+		: /* no output */: /* no input */ : "memory");
 }
