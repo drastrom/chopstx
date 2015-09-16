@@ -329,9 +329,6 @@ static struct chx_queue q_ready;
 /* Queue of threads waiting for timer.  */
 static struct chx_queue q_timer;
 
-/* Queue of threads which have been exited. */
-static struct chx_queue q_exit;
-
 /* Queue of threads which wait exit of some thread.  */
 static struct chx_queue q_join;
 
@@ -780,13 +777,13 @@ chx_init (struct chx_thread *tp)
 #endif
   q_ready.next = q_ready.prev = (struct chx_thread *)&q_ready;
   q_timer.next = q_timer.prev = (struct chx_thread *)&q_timer;
-  q_exit.next = q_exit.prev = (struct chx_thread *)&q_exit;
   q_join.next = q_join.prev = (struct chx_thread *)&q_join;
   tp->next = tp->prev = tp;
   tp->mutex_list = NULL;
   tp->clp = NULL;
   tp->state = THREAD_RUNNING;
-  tp->flag_got_cancel = tp->flag_join_req = tp->flag_cancelable = 0;
+  tp->flag_got_cancel = tp->flag_join_req = 0;
+  tp->flag_cancelable = 1;
   tp->flag_sched_rr = (CHX_FLAGS_MAIN & CHOPSTX_SCHED_RR)? 1 : 0;
   tp->flag_detached = (CHX_FLAGS_MAIN & CHOPSTX_DETACHED)? 1 : 0;
   tp->prio_orig = CHX_PRIO_MAIN_INIT;
@@ -912,13 +909,10 @@ chx_exit (void *retval)
 
   if (running->flag_sched_rr)
     chx_timer_dequeue (running);
-  chx_spin_lock (&q_exit.lock);
-  ll_insert (running, &q_exit);
   if (running->flag_detached)
     running->state = THREAD_FINISHED;
   else
     running->state = THREAD_EXITED;
-  chx_spin_unlock (&q_exit.lock);
   asm volatile ("" : : "r" (r8) : "memory");
   chx_sched (CHX_SLEEP);
   /* never comes here. */
@@ -1016,7 +1010,8 @@ chopstx_create (uint32_t flags_and_prio,
   tp->mutex_list = NULL;
   tp->clp = NULL;
   tp->state = THREAD_EXITED;
-  tp->flag_got_cancel = tp->flag_join_req = tp->flag_cancelable = 0;
+  tp->flag_got_cancel = tp->flag_join_req = 0;
+  tp->flag_cancelable = 1;
   tp->flag_sched_rr = (flags_and_prio & CHOPSTX_SCHED_RR)? 1 : 0;
   tp->flag_detached = (flags_and_prio & CHOPSTX_DETACHED)? 1 : 0;
   tp->prio_orig = tp->prio = prio;
@@ -1362,8 +1357,11 @@ chx_release_irq_thread (struct chx_thread *tp)
   chx_spin_lock (&intr_lock);
   intr_prev = intr_top;
   for (intr = intr_top; intr; intr = intr->next)
-    if (intr->tp == tp)
-      break;
+    {
+      if (intr->tp == tp)
+	break;
+      intr_prev = intr;
+    }
 
   if (intr)
     {
