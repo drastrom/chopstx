@@ -36,8 +36,10 @@
 #include "board.h"
 #undef STM32F10X_MD		/* Prepare for high density device, too.  */
 #else
+# if !defined(SUNXI_SUN8IW7)
 #include "board.h"
 #include "clk_gpio_init.c"
+# endif
 #endif
 
 
@@ -55,7 +57,6 @@ extern void chx_handle_intr (void);
 
 #if defined(__ARM_ARCH_7A__)
 extern void chx_secondary_init (void);
-extern int sys_irq (void);
 
 /* Save r0, r1, r2, r3, r12, lr, pc, xpsr and branch to real handlers.  */
 static void __attribute__ ((naked))
@@ -65,16 +66,47 @@ svc_handler (void)
 		"srsia	sp, #19\n\t"	/* svc 19 */
 		"str	r12, [sp, #-8]!\n\t"
 		"push	{r0, r1, r2, r3}\n\t"
-		"mrs	r0, spsr\n\t"
-		"and	r0, r0, #31\n\t"
-		"cmp	r0, #19\n\t"	/* svc 19 */
-		"ite	eq\n\t"
-		"mrseq	r1, LR_svc\n\t"	/* Is this possible? */
-		"mrsne	r1, LR_usr\n\t"
-		"str	r1, [sp, #5*4]\n\t"
+		"mrs	r0, LR_usr\n\t"
+		"str	r0, [sp, #5*4]\n\t"
 		"b	svc" : /* no output */ : /* no input */ : "memory");
 }
 
+# if defined(SUNXI_SUN8IW7)
+static void __attribute__ ((naked))
+irq_handler (void)
+{
+  asm volatile ("sub	r14, r14, #4\n\t"
+		"sub	sp, sp, #8\n\t"
+		"srsia	sp, #18\n\t"	/* irq 18 */
+		"str	r12, [sp, #-8]!\n\t"
+		"push	{r0, r1, r2, r3}\n\t"
+		"mrs	r0, LR_usr\n\t"
+		"str	r0, [sp, #5*4]\n\t"
+		"bl	chx_irq\n\t"
+		"cmp	r0, #0\n\t"
+		"beq	2f\n\t"
+		/* Change to SVC mode after copying stack.  */
+		"mrs	r2, SP_svc\n\t"
+		"sub	r3, r2, #32\n\t"
+		"msr	SP_svc, r3\n\t"
+	"0:\n\t"
+		"ldr	r1, [sp], #4\n\t"
+		"str	r1, [r3], #4\n\t"
+		"cmp	r3, r2\n\t"
+		"bne	0b\n\t"
+		"cpsid	i, #19\n\t"
+		"cmp	r0, #1\n\t"
+		"beq	1f\n\t"
+		"b	preempt\n"
+	"1:\n\t"
+		"bl	chx_timer_expired\n"
+	"2:\n\t"
+		"ldm	sp!, {r0-r3}\n\t"
+		"ldr	r12, [sp], #4\n\t"
+		"add	sp, #4\n\t"
+		"rfe	sp!" : /* no output */ : /* no input */ : "memory");
+}
+# else
 static void __attribute__ ((naked))
 irq_handler (void)
 {
@@ -114,6 +146,7 @@ irq_handler (void)
 		"add	sp, #4\n\t"
 		"rfe	sp!" : /* no output */ : /* no input */ : "memory");
 }
+# endif
 #endif
 
 static void nmi (void)
@@ -153,7 +186,8 @@ static void bus_fault (void)
   asm volatile ("mrc	p15, 0, r0, c5, c0, 0\n\t"
 		"mrc	p15, 0, r1, c6, c0, 0\n\t"
 		"mrc	p15, 0, r2, c5, c0, 1\n\t"
-		"mrc	p15, 0, r3, c6, c0, 2" : : : "r0", "r1", "r2", "r3");
+		"mrc	p15, 0, r3, c6, c0, 2"
+		 : : : "r0", "r1", "r2", "r3");
 #endif
   for (;;);
 }
@@ -176,7 +210,6 @@ static void none (void)
 __attribute__ ((used,section(".bss.startup.0")))
 uint32_t vectors_in_ram[48];
 #endif
-uint32_t cdata;
 
 /*
  * This routine only changes PSP and not MSP.
@@ -184,7 +217,13 @@ uint32_t cdata;
 STATIC_ENTRY __attribute__ ((naked,section(".text.startup.0")))
 void entry (void)
 {
-  asm volatile ("bl	clock_init\n\t"
+  asm volatile (
+#if defined(__ARM_ARCH_7A__)
+		"bl	stack_init\n\t"
+		"bl	mmu_init\n\t"
+#else
+		"bl	clock_init\n\t"
+#endif
 		/* Clear BSS section.  */
 		"mov	r0, #0\n\t"
 		"ldr	r1, =_bss_start\n\t"
@@ -236,12 +275,6 @@ void entry (void)
 		"str	r3, [r1], #4\n\t"
 		"cmp	r1, r2\n\t"
 		"bne	3b\n\t"
-		/* Set SCTLR.I(bit12) and SCTLR.C(bit2) to enable caches.  */
-		"mrc	p15, 0, r0, c1, c0, 0\n\t"
-		"orr	r0, r0, 0x4000\n\t"
-		"orr	r0, r0, 0x4\n\t"
-		"mcr	p15, 0, r0, c1, c0, 0\n\t"
-		"dsb\n\t"
 		"bl	irq_init\n\t"
 #endif
 		/* Switch to PSP.  */
@@ -356,13 +389,17 @@ handler vector_table[] __attribute__ ((section(".startup.vectors"))) = {
 extern void entry_thumb (void);
 
 handler vector_table[] = {
-  entry_thumb,	/* ??? Is there generic software resets for arm core?  */
-  usage_fault,
+#if defined(SUNXI_SUN8IW7)
+  entry,
+#else
+  entry_thumb,
+#endif
+  usage_fault,			/* Undefined instruction */
   svc_handler,
-  bus_fault,
-  bus_fault,
-  bus_fault,
+  bus_fault,			/* Prefetch Abort */
+  bus_fault,			/* Data Abort */
+  usage_fault,			/* Hyp Trap */
   irq_handler,
-  nmi,
+  nmi,				/* FIQ */
 };
 #endif

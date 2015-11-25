@@ -9,7 +9,7 @@ endif
 INCDIR += $(CHOPSTX)
 
 BUILDDIR = build
-OUTFILES = $(BUILDDIR)/$(PROJECT).elf $(BUILDDIR)/$(PROJECT).bin
+OUTFILES += $(BUILDDIR)/$(PROJECT).elf $(BUILDDIR)/$(PROJECT).bin
 ifneq ($(ENABLE_OUTPUT_HEX),)
 OUTFILES += $(BUILDDIR)/$(PROJECT).hex
 endif
@@ -34,6 +34,8 @@ CFLAGS   += -mthumb -mno-thumb-interwork -DTHUMB
 LDFLAGS  += -mthumb -mno-thumb-interwork
 
 CFLAGS   += -MD -MP -MF .dep/$(@F).d
+
+.PHONY : clean
 
 all: $(OUTFILES)
 

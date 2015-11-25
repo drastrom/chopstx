@@ -78,7 +78,10 @@
 #define CPU_EXCEPTION_PRIORITY_INTERRUPT     0xb0
 #define CPU_EXCEPTION_PRIORITY_PENDSV        0xc0
 #elif defined(__ARM_ARCH_7A__)
-/* There is no hardware priority level support for armv7a.  */
+/*
+ * Since some implementation of Cortex-A7 doesn't have support for
+ * hardware priority level, we don't rely on that.
+ */
 #define CPU_EXCEPTION_PRIORITY_SVC           0x00
 
 #define CPU_EXCEPTION_PRIORITY_INHIBIT_SCHED 0x40
@@ -160,12 +163,12 @@ static void chx_spin_lock (struct chx_spinlock *lk)
 #if defined(__ARM_ARCH_7A__)
   uint32_t val, nak = 1;
   do {
-    asm volatile ("ldrex %0, [%1]\n\t" : "=r" (val) : "r" (&lk->value));
+    asm volatile ("ldrex	%0, [%1]\n\t" : "=r" (val) : "r" (&lk->value));
     if (val != 0)
       asm volatile ("wfe");
     else
-      asm volatile ("strex %0, %1, [%2]\n\t"
-		    : "=r" (nak) : "r" (1), "r" (&lk->value) : "memory" );
+      asm volatile ("strex	%0, %1, [%2]\n\t"
+		    : "=&r" (nak) : "r" (1), "r" (&lk->value) : "memory" );
   } while (nak);
   asm volatile ("dmb");
 #else
@@ -221,21 +224,44 @@ struct chx_stack_regs {
 #endif
 
 #if defined(__ARM_ARCH_7A__)
-/* armv7-a doesn't have NVIC-like interrupt controller.  */
-
-# ifndef MHZ
-# define MHZ 1
-# endif
+/*
+ * Since some implementation of Cortex-A7 doesn't have NVIC-like
+ * interrupt controller with hardware priority level, we don't rely on
+ * that.  (A implementation which uses GIC is just like NVIC, though.)
+ */
 
 /* System gives their own global tick timers.  */
 # if defined(SYST_BMC2709)
+# ifndef MHZ
+# define MHZ 1
+# endif
 static volatile uint32_t *const SYST_LOD = (uint32_t *const)0x3F00B400;
 static volatile uint32_t *const SYST_VAL = (uint32_t *const)0x3F00B404;
 static volatile uint32_t *const SYST_CTL = (uint32_t *const)0x3F00B408;
 static volatile uint32_t *const SYST_RLD = (uint32_t *const)0x3F00B418;
 static volatile uint32_t *const SYST_CNT = (uint32_t *const)0x3F00B420;
+# elif defined(SUNXI_SUN8IW7)
+# ifndef MHZ
+# define MHZ 3
+# endif
+struct timer {
+  volatile uint32_t ctrl;
+  volatile uint32_t intv;
+  volatile uint32_t curr;
+};
+static struct timer *const TIMER0 = (struct timer *const)0x01c20c10;
+/* Single mode (one shot), 1/8, OSC24MHz, Reload, Start */
+# define TIMER_MODE_START (0x80|0x30|0x04|0x02|0x01)
+/* Single mode (one shot), 1/8, OSC24MHz                */
+# define TIMER_MODE_INIT  (0x80|0x30|0x04)
+
+struct timer_intr {
+  volatile uint32_t enable;
+  volatile uint32_t status;
+};
+static struct timer_intr *const TIMER_IRQ = (struct timer_intr *const)0x01c20c00;
 # else
-#error "you need some global timer implementation"
+# error "you need some global timer implementation"
 # endif
 #else
 /*
@@ -838,9 +864,14 @@ chx_set_timer (struct chx_thread *q, uint32_t ticks)
   if (q == (struct chx_thread *)&q_timer)
     {
 #if defined(__ARM_ARCH_7A__)
+# if defined(SUNXI_SUN8IW7)
+      TIMER0->intv = ticks;
+      TIMER0->ctrl = TIMER_MODE_START;
+# else
       *SYST_RLD = 0;
       *SYST_LOD = ticks;
       *SYST_CTL = 0x003E00A2;
+# endif
 #else
       *SYST_RVR = ticks;
       *SYST_CVR = 0;  /* write (any) to clear the counter to reload.  */
@@ -857,7 +888,11 @@ chx_timer_insert (struct chx_thread *tp, uint32_t usec)
   struct chx_thread *q;
 #if defined(__ARM_ARCH_7A__)
   uint32_t ticks = usec_to_ticks (usec);
+# if defined(SUNXI_SUN8IW7)
+  uint32_t next_ticks = TIMER0->curr;
+# else
   uint32_t next_ticks = *SYST_VAL;
+# endif  
 #else
   uint32_t ticks = usec_to_ticks (usec);
   uint32_t next_ticks = *SYST_CVR;
@@ -902,7 +937,11 @@ chx_timer_dequeue (struct chx_thread *tp)
       else
 	{			/* Update timer.  */
 #if defined(__ARM_ARCH_7A__)
+# if defined(SUNXI_SUN8IW7)
+	  uint32_t next_ticks = TIMER0->curr + tp->v;
+# else
 	  uint32_t next_ticks = *SYST_VAL + tp->v;
+# endif
 #else
 	  uint32_t next_ticks = *SYST_CVR + tp->v;
 #endif
@@ -923,6 +962,9 @@ chx_timer_expired (void)
   struct chx_thread *tp;
   uint16_t prio = 0;			/* Use uint16_t here. */
 
+#if defined(SUNXI_SUN8IW7)
+  TIMER_IRQ->status = 1;
+#endif
   chx_spin_lock (&q_timer.lock);
   if ((tp = ll_pop (&q_timer)))
     {
@@ -965,6 +1007,12 @@ chx_timer_expired (void)
 
 
 #if defined(__ARM_ARCH_7A__)
+# if defined(SUNXI_SUN8IW7)
+extern void chx_enable_intr (uint8_t irq_num);
+extern void chx_clr_intr (uint8_t irq_num);
+extern void chx_disable_intr (uint8_t irq_num);
+static void chx_set_intr_prio (uint8_t n) {(void)n;};
+# else
 extern void sys_enable_intr (uint8_t irq_num);
 extern void sys_clr_intr (uint8_t irq_num);
 extern void sys_disable_intr (uint8_t irq_num);
@@ -993,6 +1041,7 @@ chx_set_intr_prio (uint8_t n)
 {
   sys_set_intr_prio (n);
 }
+# endif
 
 static chopstx_intr_t *intr_top;
 static struct chx_spinlock intr_lock;
@@ -1072,9 +1121,14 @@ void
 chx_systick_init (void)
 {
 #if defined(__ARM_ARCH_7A__)
+# if defined(SUNXI_SUN8IW7)
+  TIMER0->intv = 0;
+  TIMER0->ctrl = TIMER_MODE_INIT;
+# else
   *SYST_LOD = 0;
   *SYST_RLD = 0;
   *SYST_CTL = 0x003E0000;
+# endif
 #else
   *SYST_RVR = 0;
   *SYST_CVR = 0;
@@ -1103,7 +1157,12 @@ void
 chx_init (struct chx_thread *tp)
 {
 #if defined(__ARM_ARCH_7A__)
+# if defined(SUNXI_SUN8IW7)
+  /* Enable Timer0 interrupt */
+  TIMER_IRQ->enable = 1;
+# else
   /* No interrupt controller assumed.  */
+# endif
 #else
   *AIRCR = 0x05FA0000 | ( 5 << 8); /* PRIGROUP = 5, 2-bit:2-bit. */
   *SHPR2 = (CPU_EXCEPTION_PRIORITY_SVC << 24);
@@ -1141,6 +1200,8 @@ chx_init (struct chx_thread *tp)
 
 
 #if defined(__ARM_ARCH_7A__)
+# if defined(SUNXI_SUN8IW7)
+# else
 extern void sys_secondary_init (void);
 
 void
@@ -1148,6 +1209,7 @@ chx_secondary_init (void)
 {
   sys_secondary_init ();
 }
+# endif
 #endif
 
 /**
@@ -1176,7 +1238,8 @@ static void
 chx_request_preemption (uint16_t prio)
 {
 #if defined(__ARM_ARCH_7A__)
-  int i, id = -1;
+  int i;
+  int id = -1;
   uint16_t low = MAX_PRIO;
   extern void sys_request_preemption (int id);
   /* armv7-a have no PendSV mechanism.  Some implementation dependant
