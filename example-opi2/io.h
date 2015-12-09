@@ -48,6 +48,10 @@ DEFINE_HW (BUS_SOFT_RST, static, 0x01c202c0) {
   volatile uint32_t REG1;
 };
 
+DEFINE_HW (DMA_SECURE, static, 0x01c02020) {
+  volatile uint32_t REG;
+};
+
 struct PORT {
   volatile uint32_t CFG0;	/* Port 0-7 */
   volatile uint32_t CFG1;	/* Port 8-15 */

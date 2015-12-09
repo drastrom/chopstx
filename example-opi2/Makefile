@@ -28,7 +28,7 @@ chx-sun8i7w.c: board-orange-pi-pc.h
 
 ### boot0.bin
 BOOT0_SSRC=boot0.S
-BOOT0_CSRC=boot-init.c boot-main.c # boot-dram.c
+BOOT0_CSRC=boot-init.c boot-main.c boot-dram.c
 BOOT0_OBJS   = $(addprefix $(BUILDDIR)/, $(notdir $(BOOT0_SSRC:.S=.o)))
 BOOT0_OBJS  += $(addprefix $(BUILDDIR)/, $(notdir $(BOOT0_CSRC:.c=.o)))
 BOOT0_LINK_OPTIONS=-nostdlib -nostartfiles -Wl,--section-start=.text=0x0000
@@ -39,7 +39,7 @@ $(BUILDDIR)/boot0.bin: $(BUILDDIR)/boot0-raw.bin $(BUILDDIR)/mkhd
 	./$(BUILDDIR)/mkhd $< $@
 
 $(BUILDDIR)/boot0-raw.bin: $(BUILDDIR)/boot0
-	$(OBJCOPY) --only-section=.text -O binary $< $@
+	$(OBJCOPY) --only-section=.text --only-section=.rodata -O binary $< $@
 
 $(BUILDDIR)/boot0: $(BOOT0_OBJS)
 	$(CC) -e _start $(BOOT0_LINK_OPTIONS) -o $@ $(BOOT0_OBJS)

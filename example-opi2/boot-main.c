@@ -29,10 +29,6 @@ set_led_sts (uint32_t on_off)
 void
 boot_main (void)
 {
-#if 0
-  set_led_pwr (1);
-#endif
-
   while (1)
     {
       set_led_sts (1);

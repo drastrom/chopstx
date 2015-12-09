@@ -440,8 +440,6 @@ chx_secondary_init (void)
 {
   int id, im = core_id ();
 
-  CPUS_RESET->CTRL |= 1;	/* De-assert CPUS reset.  */
-
   CPUCFG_P->REG0 = (uint32_t)entry_core;
   asm volatile ("dsb");
 
@@ -452,6 +450,8 @@ chx_secondary_init (void)
   cache_init ();
 
 #if 0
+  CPUS_RESET->CTRL |= 1;	/* De-assert CPUS reset.  */
+
   CPU_GATING->REG |= 0x10;	/* Make sure enabling L2 clock.  */
   GENERAL_CONTROL->REG; /* L2 reset???*/
 #endif

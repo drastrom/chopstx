@@ -100,18 +100,11 @@ struct dram_para {
   int row_bits;
 };
 
-static const uint8_t bin_to_mgray[32] = {
-  0x00, 0x01, 0x02, 0x03, 0x06, 0x07, 0x04, 0x05,
-  0x0c, 0x0d, 0x0e, 0x0f, 0x0a, 0x0b, 0x08, 0x09,
-  0x18, 0x19, 0x1a, 0x1b, 0x1e, 0x1f, 0x1c, 0x1d,
-  0x14, 0x15, 0x16, 0x17, 0x12, 0x13, 0x10, 0x11,
-};
-
-static const uint8_t mgray_to_bin[32] = {
-  0x00, 0x01, 0x02, 0x03, 0x06, 0x07, 0x04, 0x05,
-  0x0e, 0x0f, 0x0c, 0x0d, 0x08, 0x09, 0x0a, 0x0b,
-  0x1e, 0x1f, 0x1c, 0x1d, 0x18, 0x19, 0x1a, 0x1b,
-  0x10, 0x11, 0x12, 0x13, 0x16, 0x17, 0x14, 0x15,
+static const uint8_t table[32] = {
+  0x00, 0x00, 0x01, 0x02, 0x07, 0x04, 0x03, 0x06,
+  0x0b, 0x08, 0x0f, 0x0a, 0x05, 0x0c, 0x0d, 0x0e,
+  0x13, 0x10, 0x17, 0x12, 0x1d, 0x14, 0x15, 0x16,
+  0x09, 0x18, 0x19, 0x1a, 0x1f, 0x1c, 0x1b, 0x1e
 };
 
 #define DRAM_CLK 672
@@ -215,20 +208,20 @@ set_timing (void)
                        | DRAMTMG5_TCKESR (tckesr) | DRAMTMG5_TCKE (tcke);
 
   /* Set two rank timing */
-  DRAMCTL0->dramtmg[8] = (DRAMCTL0->dramtmg[8] & ~0xff00) | 0x6610;
+  DRAMCTL0->dramtmg[8] = (DRAMCTL0->dramtmg[8] & ~0xffff) | 0x6610;
 
   /* Set PHY interface timing */
   const int t_rdata_en	= 4;
   const int wr_latency	= 2;
-  DRAMCTL0->pitmg[0] = 0x200000 | (t_rdata_en << 16)
-                     | (1 << 8) | (wr_latency << 0);
+  DRAMCTL0->pitmg[0] = 0x2000000 | (t_rdata_en << 16) | (1 << 8) | wr_latency;
 
   /* Set PHY timing */
   const int tdinit0 = (500 * DRAM_CLK) + 1;		/* 500us */
   const int tdinit1 = (360 * DRAM_CLK) / 1000 + 1;	/* 360ns */
+  DRAMCTL0->ptr[3]= PTR3_TDINIT0 (tdinit0) | PTR3_TDINIT1 (tdinit1);
+
   const int tdinit2 = (200 * DRAM_CLK) + 1;		/* 200us */
   const int tdinit3 = (1 * DRAM_CLK) + 1;		/* 1us */
-  DRAMCTL0->ptr[3]= PTR3_TDINIT0 (tdinit0) | PTR3_TDINIT1 (tdinit1);
   DRAMCTL0->ptr[4]= PTR4_TDINIT2 (tdinit2) | PTR4_TDINIT3 (tdinit3);
 
   /* Set refresh timing */
@@ -290,10 +283,10 @@ sys_init (void)
   /*              EN           UPD        N=28       K=2     M=1  */
   while ((PLL_DDR->CTRL & 0x80000000) == 0)
     ;
-  delay_us (50);
+  delay_us (20);
 
-  DRAM_CONFIG->REG = (DRAM_CONFIG->REG & ~0x30000f)
-                   | 0x010000; /* DIV=1, SRC=PLL5, UPD */
+  /* DIV=1, SRC=PLL5, UPD */
+  DRAM_CONFIG->REG = (DRAM_CONFIG->REG & ~0x30000f) | 0x010000;
   delay_us (20);
   while ((DRAM_CONFIG->REG & 0x010000) != 0)
     ;
@@ -326,7 +319,7 @@ dq_delay (uint32_t delay_read, uint32_t delay_write)
   for (i = 0; i < 4; i++)
     {
       val = (((delay_write >> (i * 4)) & 0xf) << 8)
-	  | ((delay_read >> (i * 4)) & 0xf);
+          | ((delay_read >> (i * 4)) & 0xf);
 
       for (j = DATX_IOCR_DQ(0); j <= DATX_IOCR_DM; j++)
 	DRAMCTL0->datx[i].iocr[j] |= val;
@@ -337,7 +330,7 @@ dq_delay (uint32_t delay_read, uint32_t delay_write)
   for (i = 0; i < 4; i++)
     {
       val = (((delay_write >> (16 + i * 4)) & 0xf) << 8)
-	  | ((delay_read >> (16 + i * 4)) & 0xf);
+          | ((delay_read >> (16 + i * 4)) & 0xf);
 
       DRAMCTL0->datx[i].iocr[DATX_IOCR_DQS] |= val;
       DRAMCTL0->datx[i].iocr[DATX_IOCR_DQSN]|= val;
@@ -345,7 +338,7 @@ dq_delay (uint32_t delay_read, uint32_t delay_write)
 
   DRAMCTL0->pgcr[0] |= (1 << 26);
 
-  delay_us(1);
+  delay_us (1);
 }
 
 #define PIR_CLRSR	(0x1 << 27)	/* clear status registers */
@@ -363,35 +356,44 @@ static void
 phy_init (uint32_t val)
 {
   DRAMCTL0->pir = val | PIR_INIT;
+  delay_us (1);
   while ((DRAMCTL0->pgsr[0] & PGSR_INIT_DONE) == 0)
     ;
+  delay_us (10);
 }
 
 static void
 zq_calibration (void)
 {
   int i;
+  uint16_t zq_val[6];
 
-  DRAMCTL0->zqcr = (DRAMCTL0->zqcr & ~0x00ffffff) | (3881979 & 0x00ffffff);
-  phy_init (PIR_ZCAL);
-  delay_us (10);
+  DRAMCTL0->zqdr[2] = 0x0a0a0a0a;
 
-  for (i = 0; i < 3; i++)
+  for (i = 0; i < 6; i++)
     {
-      uint32_t v, zq;
+      uint8_t zq = (3881979 >> (i * 4)) & 0x0f;
 
-      v = DRAMCTL0->zqdr[i];
+      DRAMCTL0->zqcr = (zq << 20) | (zq << 16) | (zq << 12) | (zq << 8)
+		     | (zq <<  4) | (zq <<  0);
 
-      zq = mgray_to_bin[v & 0x1f];
-      v &= ~(0x1f << 8);
-      v |= bin_to_mgray[zq] << 8;
+      DRAMCTL0->pir = PIR_CLRSR;
+      delay_us (1);
+      phy_init (PIR_ZCAL);
 
-      zq = mgray_to_bin[(v >> 16) & 0x1f];
-      v &= ~(0x1f << 24);
-      v |= bin_to_mgray[zq] << 24;
+      zq_val[i] = DRAMCTL0->zqdr[0] & 0xff;
+      DRAMCTL0->zqdr[2] = (0x01010101 * zq_val[i]);
 
-      DRAMCTL0->zqdr[i] = v;
+      DRAMCTL0->pir = PIR_CLRSR;
+      delay_us (1);
+      phy_init (PIR_ZCAL);
+
+      zq_val[i] |= table[(DRAMCTL0->zqdr[0] >> 24) & 0x1f] << 8;
     }
+
+  DRAMCTL0->zqdr[0] = (zq_val[1] << 16) | zq_val[0];
+  DRAMCTL0->zqdr[1] = (zq_val[3] << 16) | zq_val[2];
+  DRAMCTL0->zqdr[2] = (zq_val[5] << 16) | zq_val[4];
 }
 
 #define CR_BL8		(0x4 << 20)
@@ -406,7 +408,7 @@ zq_calibration (void)
 #define CR_32BIT	(0x1 << 12)
 #define CR_16BIT	(0x0 << 12)
 #define CR_BUS_WIDTH(x)	((x) == 32 ? CR_32BIT : CR_16BIT)
-#define CR_PAGE_SIZE(x)	((x) - 3) << 8)
+#define CR_PAGE_SIZE(x)	(((x) - 3) << 8)
 #define CR_ROW_BITS(x)	(((x) - 1) << 4)
 #define CR_EIGHT_BANKS	(0x1 << 2)
 #define CR_FOUR_BANKS	(0x0 << 2)
@@ -416,7 +418,7 @@ zq_calibration (void)
 static void
 set_cr (struct dram_para *para)
 {
-  DRAMCOM->cr = CR_BL8 | CR_1T | CR_DDR3 | CR_INTERLEAVED | CR_EIGHT_BANKS 
+  DRAMCOM->cr = CR_BL8 | CR_2T | CR_DDR3 | CR_INTERLEAVED | CR_EIGHT_BANKS 
               | CR_BUS_WIDTH (para->bus_width)
               | (para->dual_rank ? CR_DUAL_RANK : CR_SINGLE_RANK)
               | CR_PAGE_SIZE (para->page_size_order)
@@ -433,8 +435,9 @@ channel_init (struct dram_para *para)
   set_timing ();
   set_master_priority ();
 
+  /* DRAM VTC disable */
   DRAMCTL0->pgcr[0] &= ~0x4000003f;
-  DRAMCTL0->pgcr[1] = (DRAMCTL0->pgcr[1] & ~0x01000000)|  0x04000000;
+  DRAMCTL0->pgcr[1] = (DRAMCTL0->pgcr[1] & ~0x01000000) | 0x04000000;
 
 #define MAGIC 0x94be6fa3
 
@@ -444,27 +447,36 @@ channel_init (struct dram_para *para)
   DRAMCOM->protect = 0x0;
   delay_us (100);
 
-  /* ODT */
+  /* DRAMC DQS/DQ ODT enable.  */
   for (i = 0; i < 4; i++)
-    DRAMCTL0->datx[i].gcr &= ~((0x3 << 14)| (0x3 << 12)|
-			       (0x3 << 4) | (0x3 << 2) | (0x1 << 1));
+    DRAMCTL0->datx[i].gcr = (DRAMCTL0->datx[i].gcr & ~(0xf03e))/* | 0x10*/;
 
   DRAMCTL0->aciocr  |= 0x2;
-  DRAMCTL0->pgcr[2] |= (0x3 << 6);
-  DRAMCTL0->pgcr[0] &= ~((0x3 << 14) | (0x3 << 12));
-  DRAMCTL0->pgcr[2] = (DRAMCTL0->pgcr[2]& ~((0x3 << 10) | (0x3 << 8)))
-                    | ((0x1 << 10) | (0x2 << 8));
+
+  /* auto gate PD */
+  DRAMCTL0->pgcr[2] |= 0xc0;
+
+  if (para->bus_width != 32)
+    {
+      DRAMCTL0->datx[2].gcr = 0;
+      DRAMCTL0->datx[3].gcr = 0;
+    }
+
+  DRAMCTL0->pgcr[0] &= ~(0xf000);
+  DRAMCTL0->pgcr[2] = (DRAMCTL0->pgcr[2] & ~(0x0f00)) | 0x0600;
 
   /* data training configuration */
-  DRAMCTL0->dtcr = (DRAMCTL0->dtcr & ~(0xf << 24))|(0x1 << 24);
+  DRAMCTL0->dtcr = (DRAMCTL0->dtcr & ~(0xf << 24))
+                 | ((para->dual_rank ? 0x03 : 0x01) << 24);
 
   dq_delay (0x00007979, 0x6aaa0000);
   delay_us (50);
 
   zq_calibration ();
 
-  phy_init (PIR_PLLINIT | PIR_DCAL | PIR_PHYRST | PIR_DRAMRST
-	    | PIR_DRAMINIT | PIR_QSGATE);
+  phy_init (PIR_PLLINIT | PIR_DCAL | PIR_PHYRST | PIR_DRAMRST | PIR_DRAMINIT);
+  delay_us (20);
+  phy_init (PIR_QSGATE);
 
   /* detect ranks and bus width */
   if ((DRAMCTL0->pgsr[0] & (0xfe << 20)))
@@ -487,7 +499,7 @@ channel_init (struct dram_para *para)
       delay_us (20);
 
       DRAMCTL0->dtcr = (DRAMCTL0->dtcr & ~(0xf << 24))
-	             | ((para->dual_rank ? 0x3 : 0x1) << 24);
+                     | ((para->dual_rank ? 0x3 : 0x1) << 24);
       phy_init (PIR_QSGATE);
       if ((DRAMCTL0->pgsr[0] & (0xfe << 20)))
 	return -1;
@@ -501,7 +513,7 @@ channel_init (struct dram_para *para)
   DRAMCTL0->rfshctl0 &= ~0x80000000;
   delay_us (10);
 
-  DRAMCTL0->pgcr[3] =  0x00aa0060;
+  DRAMCTL0->pgcr[3] = 0x00aa0060;
 
   DRAMCTL0->zqcr |= 0x80000000; /* power down */
 
@@ -543,7 +555,6 @@ auto_detect_dram_size (struct dram_para *para)
       break;
 }
 
-extern void set_led_pwr (uint32_t on_off);
 
 uint32_t
 boot_dram (void)
@@ -551,27 +562,13 @@ boot_dram (void)
   struct dram_para para = {
     .bus_width = 32,
     .dual_rank = 0,
-    .page_size_order = 12,
-    .row_bits = 14,
+    .page_size_order = 14,
+    .row_bits = 13,
   };
-
-
-  /* Return DRAM size */
-  {
-    asm volatile ("movs	r3, #0x0004b000\n\t"
-		  "str	%0, [r3], #4\n\t"
-		  "str	%0, [r3], #4\n\t"
-		  "str	%0, [r3]"
-		  :
-		  : "r" (0), "r" (0), "r" (0)
-		  : "r3");
-  }
 
   sys_init ();
   if (channel_init (&para) < 0)
     return 0;
-
-  set_led_pwr (1);
 
   if (para.dual_rank)
     DRAMCTL0->odtmap = 0x00000303;
@@ -587,17 +584,17 @@ boot_dram (void)
   auto_detect_dram_size (&para);
   set_cr (&para);
 
-  /* Return DRAM size */
-  {
-    asm volatile ("movs	r3, #0x0004b000\n\t"
-		  "str	%0, [r3], #4\n\t"
-		  "str	%0, [r3], #4\n\t"
-		  "str	%0, [r3]"
-		  :
-		  : "r" (para.row_bits), "r" (para.page_size_order),
-		    "r" (para.dual_rank)
-		  : "r3");
-  }
+#if 0
+  /* Wrote DRAM size */
+  asm volatile ("movs	r3, #0x0004b000\n\t"
+		"str	%0, [r3], #4\n\t"
+		"str	%1, [r3], #4\n\t"
+		"str	%2, [r3]"
+		:
+		: "r" (para.row_bits), "r" (para.page_size_order),
+		  "r" (para.dual_rank)
+		: "r3");
+#endif
 
   return (1 << (para.row_bits + para.page_size_order + para.dual_rank + 3));
 }

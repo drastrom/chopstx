@@ -34,7 +34,7 @@ start:
 	////
 	mov	sp, #0x0004b000
 	blx	boot_init
-	@blx	boot_dram
+	blx	boot_dram
 	////
 	@bl	clear_bss
 	blx	boot_main	// NEVER RETURN

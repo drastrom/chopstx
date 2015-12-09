@@ -41,10 +41,12 @@ clk_init (void)
   BUS_SOFT_RST->REG0   |= 0x40;	/* De-assert reset of DMA */
   BUS_CLK_GATING->REG0 |= 0x40;
 
+  /* DMA secure setting */
+  DMA_SECURE->REG = 7;
+
   /* Assert MBUS domain, Enable MBUS */
   MBUS_RST->REG = 0x80000000;
-  MBUS_CLK->REG0 = 0x81000001;
-  MBUS_CLK->REG0 = 0x81000001;
+  MBUS_CLK->REG0 = 0x81000002;
 
   /* Enable PERIPH0 PLL */
   PLL_PERIPH0->CTRL |= 0x80000000;
