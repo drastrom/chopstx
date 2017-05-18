@@ -1,7 +1,7 @@
 /*
  * chopstx.h - Threads and only threads.
  *
- * Copyright (C) 2013, 2016 Flying Stone Technology
+ * Copyright (C) 2013, 2016, 2017 Flying Stone Technology
  * Author: NIIBE Yutaka <gniibe@fsij.org>
  *
  * This file is a part of Chopstx, a thread library for embedded.
@@ -30,7 +30,7 @@ struct chx_qh {
   struct chx_pq *next, *prev;
 };
 
-typedef uint32_t chopstx_t;
+typedef uintptr_t chopstx_t;
 typedef uint8_t chopstx_prio_t;
 
 extern chopstx_t chopstx_main;
@@ -39,7 +39,7 @@ extern chopstx_t chopstx_main;
 /* NOTE: This signature is different to PTHREAD's one.  */
 chopstx_t
 chopstx_create (uint32_t flags_and_prio,
-		uint32_t stack_addr, size_t stack_size,
+		uintptr_t stack_addr, size_t stack_size,
 		void *(thread_entry) (void *), void *);
 #define CHOPSTX_PRIO_BITS 8
 #define CHOPSTX_DETACHED 0x10000

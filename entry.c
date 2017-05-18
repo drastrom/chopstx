@@ -1,7 +1,7 @@
 /*
  * entry.c - Entry routine when reset and interrupt vectors.
  *
- * Copyright (C) 2013, 2014, 2015, 2016
+ * Copyright (C) 2013, 2014, 2015, 2016, 2017
  *               Flying Stone Technology
  * Author: NIIBE Yutaka <gniibe@fsij.org>
  *
@@ -32,6 +32,26 @@
 #include <chopstx.h>
 
 #include "board.h"
+
+#ifdef GNU_LINUX_EMULATION
+int emu_main (int, const char **);
+void chx_init (void);
+void chx_systick_init (void);
+
+void
+entry (void)
+{
+#if 0
+  clock_init ();
+#endif
+  chx_init ();
+  chx_systick_init ();
+#if 0
+  gpio_init();
+#endif
+  emu_main (0, NULL);
+}
+#else
 #if defined(USE_SYS3) || defined(USE_SYS_CLOCK_GPIO_SETTING)
 #define REQUIRE_CLOCK_GPIO_SETTING_IN_SYS
 #include "sys.h"
@@ -225,3 +245,4 @@ handler vector_table[] __attribute__ ((section(".startup.vectors"))) = {
   chx_handle_intr,  chx_handle_intr,  chx_handle_intr,
 #endif
 };
+#endif
