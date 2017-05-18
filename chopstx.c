@@ -495,7 +495,6 @@ chx_timer_expired (void)
     }
 
   chx_request_preemption (prio, &q_timer.lock);
-  chx_spin_unlock (&q_timer.lock);
 }
 
 /* Queue of threads which wait for some interrupts.  */
@@ -527,7 +526,7 @@ chx_handle_intr (void)
 	ll_dequeue (p);
 	chx_wakeup (p);
 	chx_request_preemption (px->master->prio, &q_intr.lock);
-	break;
+	return;
       }
   chx_spin_unlock (&q_intr.lock);
 }
@@ -620,7 +619,10 @@ chx_request_preemption (uint16_t prio, struct chx_spinlock *lk)
   ucontext_t *tcp;
 
   if (running && (uint16_t)running->prio >= prio)
-    return;
+    {
+      chx_spin_unlock (lk);
+      return;
+    }
 
   /* Change the context to another thread with higher priority.  */
   tp = tp_prev = running;
