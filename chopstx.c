@@ -170,7 +170,7 @@ static struct chx_queue q_join;
 
 
 /* Forward declaration(s). */
-static void chx_request_preemption (uint16_t prio, ucontext_t *intr_tcp, struct chx_spinlock *lk);
+static void chx_request_preemption (uint16_t prio, struct chx_spinlock *lk);
 static int chx_wakeup (struct chx_pq *p);
 
 /**************/
@@ -453,7 +453,7 @@ chx_timer_dequeue (struct chx_thread *tp)
 
 
 void
-chx_timer_expired (ucontext_t *intr_tcp)
+chx_timer_expired (void)
 {
   struct chx_thread *tp;
   uint16_t prio = 0;			/* Use uint16_t here. */
@@ -494,7 +494,7 @@ chx_timer_expired (ucontext_t *intr_tcp)
 	}
     }
 
-  chx_request_preemption (prio, intr_tcp, &q_timer.lock);
+  chx_request_preemption (prio, &q_timer.lock);
   chx_spin_unlock (&q_timer.lock);
 }
 
@@ -512,7 +512,7 @@ chx_get_irq_number (void)
 
 
 void
-chx_handle_intr (ucontext_t *intr_tcp)
+chx_handle_intr (void)
 {
   struct chx_pq *p;
   uint32_t irq_num = chx_get_irq_number ();
@@ -526,7 +526,7 @@ chx_handle_intr (ucontext_t *intr_tcp)
 
 	ll_dequeue (p);
 	chx_wakeup (p);
-	chx_request_preemption (px->master->prio, intr_tcp, &q_intr.lock);
+	chx_request_preemption (px->master->prio, &q_intr.lock);
 	break;
       }
   chx_spin_unlock (&q_intr.lock);
@@ -555,13 +555,10 @@ static char idle_stack[4096];
 static struct chx_thread main_thread;
 
 static void
-sigalrm_handler (int sig, siginfo_t *info, void *u)
+sigalrm_handler (int sig)
 {
-  ucontext_t *intr_tcp = u;
-
   (void)sig;
-  (void)info;
-  chx_timer_expired (intr_tcp);
+  chx_timer_expired ();
 }
 
 void
@@ -570,9 +567,9 @@ chx_init (void)
   struct chx_thread *tp = &main_thread;
   struct sigaction sa;
 
-  sa.sa_sigaction = sigalrm_handler;
+  sa.sa_handler = sigalrm_handler;
   sigemptyset (&sa.sa_mask);
-  sa.sa_flags = SA_SIGINFO;
+  sa.sa_flags = 0;
   sigaction (SIGALRM, &sa, NULL); 
 
   getcontext (&idle_tc);
@@ -617,7 +614,7 @@ chx_init (void)
 
 
 static void 
-chx_request_preemption (uint16_t prio, ucontext_t *intr_tcp, struct chx_spinlock *lk)
+chx_request_preemption (uint16_t prio, struct chx_spinlock *lk)
 {
   struct chx_thread *tp, *tp_prev;
   ucontext_t *tcp;
@@ -659,17 +656,22 @@ chx_request_preemption (uint16_t prio, ucontext_t *intr_tcp, struct chx_spinlock
   chx_spin_unlock (lk);
   if (tp_prev)
     {
-      memset (&tp_prev->tc, 0, sizeof (ucontext_t));
-      memcpy (&tp_prev->tc, intr_tcp,
-	      sizeof (ucontext_t) + sizeof (unsigned long) - sizeof (__sigset_t) - sizeof (struct _libc_fpstate));
-      if (tcp->uc_flags == 0)
-	sigemptyset (&tcp->uc_sigmask);
-      setcontext (tcp);
+      /*
+       * The swapcontext implementation may reset sigmask in the
+       * middle of its execution, unfortunately.  It is best if
+       * sigmask restore is done at the end of the routine, but we
+       * can't assume that.
+       *
+       * Thus, there might be a race condition with regards to the
+       * user context TCP, if signal mask is cleared and signal comes
+       * in.  To avoid this situation, we block signals.
+       */
+      sigfillset (&tcp->uc_sigmask);
+      swapcontext (&tp_prev->tc, tcp);
     }
   else if (tp)
     {
-      if (tcp->uc_flags == 0)
-	sigemptyset (&tcp->uc_sigmask);
+      sigfillset (&tcp->uc_sigmask);
       setcontext (tcp);
     }
 }
@@ -730,9 +732,8 @@ chx_sched (uint32_t yield)
       tcp = &idle_tc;
     }
 
-  if (tcp->uc_flags == 0)
-    sigemptyset (&tcp->uc_sigmask);
   swapcontext (&tp_prev->tc, tcp);
+  chx_cpu_sched_unlock ();
   return v;
 }
 
