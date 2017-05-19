@@ -36,8 +36,6 @@
 #include <unistd.h>
 #include <ucontext.h>
 #include <signal.h>
-#include <poll.h>
-#include <sys/eventfd.h>
 #include <sys/time.h>
 
 /*
@@ -104,7 +102,7 @@ chx_enable_intr (uint8_t irq_num)
 
   sigemptyset (&ss);
   sigaddset (&ss, irq_num);
-  sigprocmask (SIG_UNBLOCK, &ss, NULL);
+  pthread_sigmask (SIG_UNBLOCK, &ss, NULL);
 }
 
 static void
@@ -120,7 +118,7 @@ chx_disable_intr (uint8_t irq_num)
 
   sigemptyset (&ss);
   sigaddset (&ss, irq_num);
-  sigprocmask (SIG_BLOCK, &ss, NULL);
+  pthread_sigmask (SIG_BLOCK, &ss, NULL);
 }
 
 static void
@@ -246,13 +244,13 @@ chx_cpu_sched_lock (void)
   sigset_t ss;
 
   sigfillset (&ss);
-  sigprocmask (SIG_BLOCK, &ss, &ss_orig);
+  pthread_sigmask (SIG_BLOCK, &ss, &ss_orig);
 }
 
 static void
 chx_cpu_sched_unlock (void)
 {
-  sigprocmask (SIG_SETMASK, &ss_orig, NULL);
+  pthread_sigmask (SIG_SETMASK, &ss_orig, NULL);
 }
 
 /*
