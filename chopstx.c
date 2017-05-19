@@ -170,7 +170,7 @@ static struct chx_queue q_join;
 
 
 /* Forward declaration(s). */
-static void chx_request_preemption (uint16_t prio, struct chx_spinlock *lk);
+static void chx_request_preemption (uint16_t prio);
 static int chx_wakeup (struct chx_pq *p);
 
 /**************/
@@ -494,7 +494,8 @@ chx_timer_expired (void)
 	}
     }
 
-  chx_request_preemption (prio, &q_timer.lock);
+  chx_spin_unlock (&q_timer.lock);
+  chx_request_preemption (prio);
 }
 
 /* Queue of threads which wait for some interrupts.  */
@@ -525,7 +526,8 @@ chx_handle_intr (void)
 
 	ll_dequeue (p);
 	chx_wakeup (p);
-	chx_request_preemption (px->master->prio, &q_intr.lock);
+	chx_spin_unlock (&q_intr.lock);
+	chx_request_preemption (px->master->prio);
 	return;
       }
   chx_spin_unlock (&q_intr.lock);
@@ -613,16 +615,13 @@ chx_init (void)
 
 
 static void 
-chx_request_preemption (uint16_t prio, struct chx_spinlock *lk)
+chx_request_preemption (uint16_t prio)
 {
   struct chx_thread *tp, *tp_prev;
   ucontext_t *tcp;
 
   if (running && (uint16_t)running->prio >= prio)
-    {
-      chx_spin_unlock (lk);
-      return;
-    }
+    return;
 
   /* Change the context to another thread with higher priority.  */
   tp = tp_prev = running;
@@ -655,7 +654,6 @@ chx_request_preemption (uint16_t prio, struct chx_spinlock *lk)
   else
     tcp = &idle_tc;
 
-  chx_spin_unlock (lk);
   if (tp_prev)
     {
       /*
@@ -667,13 +665,16 @@ chx_request_preemption (uint16_t prio, struct chx_spinlock *lk)
        * Thus, there might be a race condition with regards to the
        * user context TCP, if signal mask is cleared and signal comes
        * in.  To avoid this situation, we block signals.
+       *
+       * We don't need to fill the mask here.  It keeps the condition
+       * of blocking signals before&after swapcontext call.  It is
+       * done by the signal mask for sigaction, the initial creation
+       * of the thread, the chx_sched function.
        */
-      sigfillset (&tcp->uc_sigmask);
       swapcontext (&tp_prev->tc, tcp);
     }
   else if (tp)
     {
-      sigfillset (&tcp->uc_sigmask);
       setcontext (tcp);
     }
 }
@@ -859,6 +860,7 @@ extern void cause_link_time_error_unexpected_size_of_struct_chx_thread (void);
 static void __attribute__((__noreturn__))
 chx_thread_start (voidfunc thread_entry, void *arg)
 {
+  chx_cpu_sched_unlock ();
   thread_entry (arg);
   chopstx_exit (0);
 }
@@ -885,6 +887,11 @@ chopstx_create (uint32_t flags_and_prio,
   if (!tp)
     chx_fatal (CHOPSTX_ERR_THREAD_CREATE);
 
+  /*
+   * Calling getcontext with sched_lock held, the context is with
+   * signal blocked.  The sigmask will be cleared in chx_thread_start.
+   */
+  chx_cpu_sched_lock ();
   getcontext (&tp->tc);
   tp->tc.uc_stack.ss_sp = (void *)stack_addr;
   tp->tc.uc_stack.ss_size = stack_size;
@@ -892,6 +899,7 @@ chopstx_create (uint32_t flags_and_prio,
 
   makecontext (&tp->tc, (void (*)(void))chx_thread_start,
 	       4, thread_entry, arg);
+  chx_cpu_sched_unlock ();
 
   tp->next = tp->prev = (struct chx_pq *)tp;
   tp->mutex_list = NULL;
