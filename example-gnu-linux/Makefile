@@ -2,10 +2,10 @@
 
 PROJECT = sample
 
-### This if for GNU/Linux
+### This is for GNU/Linux
 
 CHOPSTX = ..
-LDSCRIPT= sample.ld
+LDSCRIPT= 
 CSRC = sample.c
 
 CHIP=gnu-linux

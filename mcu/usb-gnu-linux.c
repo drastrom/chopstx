@@ -34,6 +34,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
+#include <usb_lld.h>
+
 static pthread_t tid_main;
 static pthread_t tid_usbip;
 
@@ -118,6 +120,8 @@ list_devices (size_t *len_p)
 static char *
 attach_device (char busid[32], size_t *len_p)
 {
+  (void)busid;
+
   *len_p = 0;
   return NULL;
 }
@@ -125,6 +129,7 @@ attach_device (char busid[32], size_t *len_p)
 static int
 handle_urb (int fd)
 {
+  (void)fd;
   return 0;
 }
 
@@ -143,11 +148,11 @@ static void
 notify_usbip (void)
 {
   pthread_mutex_lock (&comm_mutex);
-  pthread_cond_signal (&comm_cond, &comm_mutex);
+  pthread_cond_signal (&comm_cond);
   pthread_mutex_unlock (&comm_mutex);
 }
 
-static void
+static void *
 run_server (void *arg)
 {
   int sock;
@@ -294,6 +299,8 @@ run_server (void *arg)
 
        close (fd);
     }
+
+  return NULL;
 }
 
 struct usb_control {
@@ -319,7 +326,7 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
    * we initialize USB controller on MCU.
    */
   tid_main = pthread_self ();
-  r = pthread_create (&tid_usbip, run_server, NULL);
+  r = pthread_create (&tid_usbip, NULL, run_server, NULL);
   if (r)
     {
       fprintf (stderr, "usb_lld_init: %s\n", strerror (r));
