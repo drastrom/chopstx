@@ -35,6 +35,11 @@
 #include <sys/socket.h>
 
 #include <usb_lld.h>
+#include <usb_lld_common.h>
+
+#define EP_TX_VALID (1<<0)
+#define EP_RX_VALID (1<<1)
+
 
 static pthread_t tid_main;
 static pthread_t tid_usbip;
@@ -229,7 +234,7 @@ run_server (void *arg)
 
 	      device_list = list_devices (&device_list_size);
 
-	      if (send (fd, device_list, device_list_size, 0) != device_list_size)
+	      if ((size_t)send (fd, device_list, device_list_size, 0) != device_list_size)
 		{
 		  perror ("list send");
 		  break;
@@ -256,7 +261,7 @@ run_server (void *arg)
 		}
 
 	      attach = attach_device (busid, &attach_size);
-	      if (send (fd, attach, attach_size, 0) != attach_size)
+	      if ((size_t)send (fd, attach, attach_size, 0) != attach_size)
 		{
 		  perror ("list send");
 		  break;
@@ -306,6 +311,8 @@ run_server (void *arg)
 struct usb_control {
   uint16_t tx_count;
   uint8_t  status_flag;
+  uint8_t tx_data[USB_MAX_PACKET_SIZE];
+  uint8_t rx_data[USB_MAX_PACKET_SIZE];
 };
 
 static struct usb_control usbc_ep0;
@@ -408,7 +415,7 @@ usb_lld_ctrl_send (struct usb_dev *dev, const void *buf, size_t buflen)
 
   if (len)
     {
-      usb_lld_to_pmabuf (data_p->addr, st103_get_tx_addr (ENDP0), len);
+      memcpy (usbc_ep0.tx_data, data_p->addr, len);
       data_p->len -= len;
       data_p->addr += len;
     }
@@ -421,13 +428,10 @@ usb_lld_ctrl_send (struct usb_dev *dev, const void *buf, size_t buflen)
 uint8_t
 usb_lld_current_configuration (struct usb_dev *dev)
 {
+  (void)dev;
   return 0;
 }
 
-void
-usb_lld_prepare_shutdown (void)
-{
-}
 
 void
 usb_lld_ctrl_error (struct usb_dev *dev)

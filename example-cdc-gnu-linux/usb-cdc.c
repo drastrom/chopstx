@@ -642,9 +642,9 @@ static void *tty_main (void *arg);
 #define INTR_REQ_USB 20
 #define PRIO_TTY      4
 
-extern uint8_t __process3_stack_base__[], __process3_stack_size__[];
-#define STACK_ADDR_TTY ((uint32_t)__process3_stack_base__)
-#define STACK_SIZE_TTY ((uint32_t)__process3_stack_size__)
+static char __process3_stack_base__[4096];
+#define STACK_ADDR_TTY ((uintptr_t)__process3_stack_base__)
+#define STACK_SIZE_TTY (sizeof __process3_stack_base__)
 
 struct tty *
 tty_open (void)
