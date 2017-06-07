@@ -34,12 +34,10 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
+#include <signal.h>
+
 #include <usb_lld.h>
 #include <usb_lld_common.h>
-
-#define EP_TX_VALID (1<<0)
-#define EP_RX_VALID (1<<1)
-
 
 static pthread_t tid_main;
 static pthread_t tid_usbip;
@@ -68,6 +66,12 @@ struct usbip_msg_head {
 #define NETWORK_UINT16_FSIJ      "\x23\x4b"
 #define NETWORK_UINT16_ZERO      "\x00\x00"
 #define NETWORK_UINT16_ONE_ONE   "\x01\x01"
+
+static void
+notify_app (void)
+{
+  pthread_kill (tid_main, SIGUSR1);
+}
 
 static char *
 list_devices (size_t *len_p)
@@ -131,10 +135,40 @@ attach_device (char busid[32], size_t *len_p)
   return NULL;
 }
 
+struct usbip_msg_ctl {
+  uint32_t devid;
+  uint32_t dir;
+  uint32_t ep;
+  uint32_t flags;
+  uint32_t len;
+  uint32_t start_frame;
+  uint32_t num_packets;
+  uint32_t interval;
+  uint8_t setup[8];
+};
+
 static int
-handle_urb (int fd)
+handle_urb (int fd, uint32_t seq)
 {
-  (void)fd;
+  struct usbip_msg_ctl msg_ctl;
+
+  if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+    {
+      perror ("msg recv");
+      return -1;
+    }
+
+  msg_ctl.devid = ntohl (msg_ctl.devid);
+  msg_ctl.dir = ntohl (msg_ctl.dir);
+  msg_ctl.ep = ntohl (msg_ctl.ep);
+  msg_ctl.flags = ntohl (msg_ctl.flags);
+  msg_ctl.len = ntohl (msg_ctl.);
+  msg_ctl.start_frame = ntohl (msg_ctl.start_frame);
+  msg_ctl.num_packets = ntohl (msg_ctl.num_packets);
+  msg_ctl.interval = ntohl (msg_ctl.interval);
+
+  // Read/write the USB buffer, fill ep buffer...
+  notify_app ();
   return 0;
 }
 
@@ -278,7 +312,7 @@ run_server (void *arg)
 		  break;
 		}
 
-	      if (handle_urb (fd) < 0)
+	      if (handle_urb (fd, msg.seq) < 0)
 		{
 		  fprintf (stderr, "URB handling failed\n");
 		  break;
@@ -308,8 +342,12 @@ run_server (void *arg)
   return NULL;
 }
 
+#define EP_TX_VALID (1<<0)
+#define EP_RX_VALID (1<<1)
+
 struct usb_control {
   uint16_t tx_count;
+  uint16_t rx_count;
   uint8_t  status_flag;
   uint8_t tx_data[USB_MAX_PACKET_SIZE];
   uint8_t rx_data[USB_MAX_PACKET_SIZE];
