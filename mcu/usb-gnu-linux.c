@@ -141,11 +141,56 @@ struct usbip_msg_ctl {
   uint32_t ep;
   uint32_t flags;
   uint32_t len;
-  uint32_t start_frame;
-  uint32_t num_packets;
-  uint32_t interval;
-  uint8_t setup[8];
+  uint32_t start_frame;		/* Only for ISO, INTERRUPT */
+  uint32_t num_packets;		/* Only for ISO            */
+  uint32_t interval;		/* Only for ISO, INTERRUPT */
+  uint8_t setup[8];		/* Only for CONTROL        */
 };
+
+
+static int
+handle_control_urb  (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+  int r;
+
+  r = setup_transaction (fd, seq, cp);
+  if (r)
+    return r;
+
+  if (cp->dir)
+    {				/* Output from host to device.  */
+      while (r == 0)
+	r = control_out_data_transaction ();
+      if (r > 0)
+	r = control_out_ack_transaction ();
+    }
+  else
+    {				/* Input from device to host.  */
+      while (r == 0)
+	r = control_in_data_transaction ();
+      if (r > 0)
+	r = control_in_ack_transaction ();
+    }
+
+  return r;
+}
+
+static int
+handle_data_urb  (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+  if (cp->dir)
+    {				/* Output from host to device.  */
+      while (r == 0)
+	r = out_data_transaction ();
+    }
+  else
+    {				/* Input from device to host.  */
+      while (r == 0)
+	r = in_data_transaction ();
+    }
+
+  return r;
+}
 
 static int
 handle_urb (int fd, uint32_t seq)
@@ -154,7 +199,7 @@ handle_urb (int fd, uint32_t seq)
 
   if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
     {
-      perror ("msg recv");
+      perror ("msg recv ctl");
       return -1;
     }
 
@@ -167,9 +212,10 @@ handle_urb (int fd, uint32_t seq)
   msg_ctl.num_packets = ntohl (msg_ctl.num_packets);
   msg_ctl.interval = ntohl (msg_ctl.interval);
 
-  // Read/write the USB buffer, fill ep buffer...
-  notify_app ();
-  return 0;
+  if (ep == 0)
+    return handle_control_urb (fd, seq, &msg_ctl);
+  else
+    return handle_data_urb (fd, seq, &msg_ctl);
 }
 
 static pthread_mutex_t comm_mutex;
@@ -191,6 +237,12 @@ notify_usbip (void)
   pthread_mutex_unlock (&comm_mutex);
 }
 
+/*
+ * In the USBIP protocol, it sends URB (USB Request Block) to this server. 
+ *
+ * This server acts/emulates as a USB host controller, and
+ * transforms URB into packets and packets into URB.
+ */
 static void *
 run_server (void *arg)
 {
