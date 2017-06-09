@@ -67,8 +67,21 @@ struct usbip_msg_head {
 #define NETWORK_UINT16_ZERO      "\x00\x00"
 #define NETWORK_UINT16_ONE_ONE   "\x01\x01"
 
+enum {
+  USB_INTR_SETUP,
+  USB_INTR_DATA_TRANSFER,
+  USB_INTR_RESET,
+  USB_INTR_SUSPEND,
+};
+
+struct usb_controller {
+  uint8_t intr;
+  uint8_t dir;
+  uint8_t ep;
+};
+
 static void
-notify_app (void)
+notify_device (uint8_t intr, uint8_t dir, uint8_t ep)
 {
   pthread_kill (tid_main, SIGUSR1);
 }
@@ -147,29 +160,78 @@ struct usbip_msg_ctl {
   uint8_t setup[8];		/* Only for CONTROL        */
 };
 
+static int control_setup_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+static int control_write_data_transaction (uint8_t *buf, uint16_t count, struct usbip_msg_ctl *cp);
+static int control_write_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+static int control_read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+static int control_read_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+static int write_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+static int read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+
 
 static int
-handle_control_urb  (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+handle_control_urb (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
 {
   int r;
 
-  r = setup_transaction (fd, seq, cp);
-  if (r)
+  r = control_setup_transaction (fd, seq, cp);
+  if (r < 0)
     return r;
 
   if (cp->dir)
     {				/* Output from host to device.  */
+      uint8_t buf[64];
+      uint16_t remain = cp->len;
+      uint16_t count;
+
       while (r == 0)
-	r = control_out_data_transaction ();
-      if (r > 0)
-	r = control_out_ack_transaction ();
+	{
+	  if (remain > 64)
+	    count = 64;
+	  else
+	    count = remain;
+
+	  if (recv (fd, (char *)buf, count, 0) != count)
+	    {
+	      perror ("msg recv control data");
+	      return -1;
+	    }
+
+	  r = control_write_data_transaction (buf, count, cp);
+	  if (r < 0)
+	    break;
+
+	  if (count < 64)
+	    break;
+	}
+      if (r >= 0)
+	r = control_write_status_transaction ();
     }
   else
     {				/* Input from device to host.  */
+      uint8_t buf[65536];
+      uint8_t p = buf;
+      uint16_t remain = cp->len;
+      uint16_t count;
+
       while (r == 0)
-	r = control_in_data_transaction ();
+	{
+	  if (remain > 64)
+	    count = 64;
+	  else
+	    count = remain;
+
+	  r = control_read_data_transaction (p, count, cp);
+	  if (r < 0)
+	    break;
+
+	  p += count;
+	  if (count < 64)
+	    break;
+	}
       if (r > 0)
-	r = control_in_ack_transaction ();
+	r = control_read_status_transaction ();
+      /* XXX: Send URB back. */
     }
 
   return r;
@@ -181,12 +243,12 @@ handle_data_urb  (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
   if (cp->dir)
     {				/* Output from host to device.  */
       while (r == 0)
-	r = out_data_transaction ();
+	r = write_data_transaction ();
     }
   else
     {				/* Input from device to host.  */
       while (r == 0)
-	r = in_data_transaction ();
+	r = read_data_transaction ();
     }
 
   return r;
@@ -394,24 +456,192 @@ run_server (void *arg)
   return NULL;
 }
 
+enum {
+  USB_STATE_STALL = 0,
+  USB_STATE_NAK,
+  USB_STATE_SETUP,
+  USB_STATE_TX,
+  USB_STATE_RX,
+};
+
 #define EP_TX_VALID (1<<0)
 #define EP_RX_VALID (1<<1)
 
 struct usb_control {
-  uint16_t tx_count;
-  uint16_t rx_count;
-  uint8_t  status_flag;
-  uint8_t tx_data[USB_MAX_PACKET_SIZE];
-  uint8_t rx_data[USB_MAX_PACKET_SIZE];
+  uint8_t state;
+  uint8_t buf[USB_MAX_PACKET_SIZE];
+  uint16_t len;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
 };
 
 static struct usb_control usbc_ep0;
-static struct usb_control usbc_ep1;
-static struct usb_control usbc_ep2;
-static struct usb_control usbc_ep3;
-static struct usb_control usbc_ep5;
-static struct usb_control usbc_ep6;
-static struct usb_control usbc_ep7;
+static struct usb_control usbc_ep1_in;
+static struct usb_control usbc_ep2_in;
+static struct usb_control usbc_ep3_in;
+static struct usb_control usbc_ep4_in;
+static struct usb_control usbc_ep5_in;
+static struct usb_control usbc_ep6_in;
+static struct usb_control usbc_ep7_in;
+static struct usb_control usbc_ep1_out;
+static struct usb_control usbc_ep2_out;
+static struct usb_control usbc_ep3_out;
+static struct usb_control usbc_ep4_out;
+static struct usb_control usbc_ep5_out;
+static struct usb_control usbc_ep6_out;
+static struct usb_control usbc_ep7_out;
+
+/* Emulate Control setup transaction.
+ *
+ * -->[SETUP]-->[DATA0]-->{ACK}-> Success
+ *                      \-------> Error
+ */
+static int
+control_setup_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+  int r;
+
+  pthread_mutex_lock (&usbc_ep0.mutex);
+  while (1)
+    if (&usbc_ep0.state == USB_STATE_NAK)
+      pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
+    else if (&usbc_ep0.state == USB_STATE_SETUP)
+      {
+	memcpy (usbc_ep0.buf, cp->setup, sizeof (cp->setup));
+	usbc_ep0.len = sizeof (cp->setup);
+	usbc_ep0.state = USB_STATE_NAK;
+	notify_device (USB_INTR_SETUP, 0, cp->dir);
+	if (cp->dir && cp->setup[6] == 0 && cp->setup[6] == 7)
+	  /* Control Write Transfer with no data satage.  */
+	  r = 1;
+	else
+	  r = 0;
+	break;
+      }
+    else
+      {
+	r = -1;
+	break;
+      }
+  pthread_mutex_unlock (&usbc_ep0.mutex);
+  return r;
+}
+
+/* Emulate OUT transaction.
+ *
+ * -->[OUT]-->[DATA0]---->{ACK}---> Success
+ *                     \--{NAK}---> again
+ *                     \--{STALL}-> Error
+ *                     \----------> Error
+ */
+static int
+control_write_data_transaction (uint8_t *buf, uint16_t count, struct usbip_msg_ctl *cp)
+{
+  int r;
+
+  pthread_mutex_lock (&usbc_ep0.mutex);
+  while (1)
+    if (&usbc_ep0.state == USB_STATE_NAK)
+      pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
+    else if (&usbc_ep0.state == USB_STATE_RX)
+      {
+	memcpy (usbc_ep0.buf, buf, count);
+	usbc_ep0.len = count;
+	usbc_ep0.state = USB_STATE_NAK;
+	notify_device (USB_INTR_DATA_TRANSFER, cp->ep, cp->dir);
+	r = 0;
+	break;
+      }
+    else
+      {
+	r = -1;
+	break;
+      }
+  pthread_mutex_unlock (&usbc_ep0.mutex);
+  return r;
+}
+
+/* Emulate status transaction for WRITE.
+ *            zero-len
+ * -->[IN]--->{DATA0}->[ACK]---> Success
+ *         \--{NAK}---> again
+ *         \--{STALL}-> Error
+ *         \----------> Error
+ */
+static int
+control_write_status_transaction (struct usbip_msg_ctl *cp)
+{
+  int r;
+
+  pthread_mutex_lock (&usbc_ep0.mutex);
+  while (1)
+    if (&usbc_ep0.state == USB_STATE_NAK)
+      pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
+    else if (&usbc_ep0.state == USB_STATE_TX)
+      {
+	if (usbc_ep0.len != 0)
+	  fprintf (stderr, "*** ACK length %d\n", usbc_ep0.len);
+	usbc_ep0.state = USB_STATE_NAK;
+	notify_device (USB_INTR_DATA_TRANSFER, cp->ep, cp->dir);
+	r = 0;
+	break;
+      }
+    else
+      {
+	r = -1;
+	break;
+      }
+  pthread_mutex_unlock (&usbc_ep0.mutex);
+  return r;
+}
+
+static int
+control_read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+}
+
+/* Emulate status transaction for READ.
+ *            zero-len
+ * -->[OUT]--->[DATA0]--->{ACK}---> Success
+ *                     \--{NAK}---> again
+ *                     \--{STALL}-> Error
+ *                     \----------> Error
+ */
+static int
+control_read_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+  int r;
+
+  pthread_mutex_lock (&usbc_ep0.mutex);
+  while (1)
+    if (&usbc_ep0.state == USB_STATE_NAK)
+      pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
+    else if (&usbc_ep0.state == USB_STATE_RX)
+      {
+	usbc_ep0.len = 0;
+	usbc_ep0.state = USB_STATE_NAK;
+	notify_device (USB_INTR_DATA_TRANSFER, cp->ep, cp->dir);
+	r = 0;
+	break;
+      }
+    else
+      {
+	r = -1;
+	break;
+      }
+  pthread_mutex_unlock (&usbc_ep0.mutex);
+  return r;
+}
+
+static int
+write_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+}
+
+static int
+read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+{
+}
 
 void
 usb_lld_init (struct usb_dev *dev, uint8_t feature)
@@ -433,6 +663,9 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
   dev->configuration = 0;
   dev->feature = feature;
   dev->state = WAIT_SETUP;
+
+  pthread_mutex_init (&usbc_ep0.mutex, NULL);
+  pthread_cond_init (&usbc_ep0.cond, NULL);
 }
 
 
