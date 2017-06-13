@@ -148,40 +148,47 @@ attach_device (char busid[32], size_t *len_p)
   return NULL;
 }
 
+#define URB_DATA_SIZE 65536
+
+#define USBIP_DIR_OUT 0
+#define USBIP_DIR_IN  1
+
 struct usbip_msg_ctl {
   uint32_t devid;
   uint32_t dir;
   uint32_t ep;
-  uint32_t flags;
+  uint32_t flags_status;
   uint32_t len;
-  uint32_t start_frame;		/* Only for ISO, INTERRUPT */
-  uint32_t num_packets;		/* Only for ISO            */
-  uint32_t interval;		/* Only for ISO, INTERRUPT */
-  uint8_t setup[8];		/* Only for CONTROL        */
+  uint32_t rsvd[2];
+  uint32_t err_cnt;
 };
 
-static int control_setup_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
-static int control_write_data_transaction (uint8_t *buf, uint16_t count, struct usbip_msg_ctl *cp);
-static int control_write_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
-static int control_read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
-static int control_read_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
-static int write_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
-static int read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp);
+static struct usbip_msg_ctl msg_ctl;
+static uint8_t usb_setup[8];
+static char usb_data[URB_DATA_SIZE];
+static char *usb_data_p;
+
+static int control_setup_transaction (void);
+static int control_write_data_transaction (uint8_t *buf, uint16_t count);
+static int control_write_status_transaction (void);
+static int control_read_data_transaction (void);
+static int control_read_status_transaction (void);
+static int write_data_transaction (void);
+static int read_data_transaction (void);
 
 
 static int
-handle_control_urb (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+handle_control_urb (void)
 {
   int r;
 
-  r = control_setup_transaction (fd, seq, cp);
+  r = control_setup_transaction ();
   if (r < 0)
     return r;
 
-  if (cp->dir)
+  if (msg_ctl.dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
-      uint8_t buf[64];
-      uint16_t remain = cp->len;
+      uint16_t remain = msg_ctl.len;
       uint16_t count;
 
       while (r == 0)
@@ -191,16 +198,11 @@ handle_control_urb (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
 	  else
 	    count = remain;
 
-	  if (recv (fd, (char *)buf, count, 0) != count)
-	    {
-	      perror ("msg recv control data");
-	      return -1;
-	    }
-
-	  r = control_write_data_transaction (buf, count, cp);
+	  r = control_write_data_transaction (usb_data_p, count);
 	  if (r < 0)
 	    break;
 
+	  usb_data_p += count;
 	  if (count < 64)
 	    break;
 	}
@@ -209,38 +211,38 @@ handle_control_urb (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
     }
   else
     {				/* Input from device to host.  */
-      uint8_t buf[65536];
-      uint8_t p = buf;
-      uint16_t remain = cp->len;
-      uint16_t count;
+      uint16_t count = 0;
 
+      usb_data_p = usb_data;
       while (r == 0)
 	{
-	  if (remain > 64)
-	    count = 64;
-	  else
-	    count = remain;
-
-	  r = control_read_data_transaction (p, count, cp);
+	  r = control_read_data_transaction (usb_data_p, 64);
 	  if (r < 0)
 	    break;
 
-	  p += count;
-	  if (count < 64)
+	  count += r;
+	  usb_data_p += r;
+	  if (r < 64)
 	    break;
+
+	  if (count == URB_DATA_SIZE)
+	    {
+	      perror ("control IN too long");
+	      return -1;
+	    }
 	}
+      msg_ctl.len = count;
       if (r > 0)
 	r = control_read_status_transaction ();
-      /* XXX: Send URB back. */
     }
 
   return r;
 }
 
 static int
-handle_data_urb  (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+handle_data_urb  (void)
 {
-  if (cp->dir)
+  if (msg_ctl.dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
       while (r == 0)
 	r = write_data_transaction ();
@@ -255,10 +257,8 @@ handle_data_urb  (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
 }
 
 static int
-handle_urb (int fd, uint32_t seq)
+handle_urb (void)
 {
-  struct usbip_msg_ctl msg_ctl;
-
   if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
     {
       perror ("msg recv ctl");
@@ -268,16 +268,36 @@ handle_urb (int fd, uint32_t seq)
   msg_ctl.devid = ntohl (msg_ctl.devid);
   msg_ctl.dir = ntohl (msg_ctl.dir);
   msg_ctl.ep = ntohl (msg_ctl.ep);
-  msg_ctl.flags = ntohl (msg_ctl.flags);
-  msg_ctl.len = ntohl (msg_ctl.);
-  msg_ctl.start_frame = ntohl (msg_ctl.start_frame);
-  msg_ctl.num_packets = ntohl (msg_ctl.num_packets);
-  msg_ctl.interval = ntohl (msg_ctl.interval);
+  msg_ctl.flags_status = ntohl (msg_ctl.flags_status);
+  msg_ctl.len = ntohl (msg_ctl.len);
+
+  if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
+    {
+      perror ("msg recv setup");
+      return -1;
+    }
+
+  usb_data_p = usb_data;
+
+  if (msg_ctl.dir == USBIP_DIR_OUT && msg_ctl.len)
+    {
+      if (msg_ctl.len > URB_DATA_SIZE)
+	{
+	  perror ("msg len too long");
+	  return -1;
+	}
+
+      if (recv (fd, usb_data, msg_ctl.len, 0) != msg_ctl.len)
+	{
+	  perror ("msg recv data");
+	  return -1;
+	}
+    }
 
   if (ep == 0)
-    return handle_control_urb (fd, seq, &msg_ctl);
+    return handle_control_urb ();
   else
-    return handle_data_urb (fd, seq, &msg_ctl);
+    return handle_data_urb ();
 }
 
 static pthread_mutex_t comm_mutex;
@@ -426,7 +446,7 @@ run_server (void *arg)
 		  break;
 		}
 
-	      if (handle_urb (fd, msg.seq) < 0)
+	      if (handle_urb () < 0)
 		{
 		  fprintf (stderr, "URB handling failed\n");
 		  break;
@@ -497,7 +517,7 @@ static struct usb_control usbc_ep7_out;
  *                      \-------> Error
  */
 static int
-control_setup_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+control_setup_transaction (void)
 {
   int r;
 
@@ -507,11 +527,12 @@ control_setup_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
     else if (&usbc_ep0.state == USB_STATE_SETUP)
       {
-	memcpy (usbc_ep0.buf, cp->setup, sizeof (cp->setup));
-	usbc_ep0.len = sizeof (cp->setup);
+	memcpy (usbc_ep0.buf, usb_setup, sizeof (usb_setup));
+	usbc_ep0.len = sizeof (usb_setup);
 	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_SETUP, 0, cp->dir);
-	if (cp->dir && cp->setup[6] == 0 && cp->setup[6] == 7)
+	notify_device (USB_INTR_SETUP, 0, msg_ctl.dir);
+	if (msg_ctl.dir == USBIP_DIR_OUT
+	    && usb_setup[6] == 0 && usb_setup[6] == 7)
 	  /* Control Write Transfer with no data satage.  */
 	  r = 1;
 	else
@@ -535,7 +556,7 @@ control_setup_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
  *                     \----------> Error
  */
 static int
-control_write_data_transaction (uint8_t *buf, uint16_t count, struct usbip_msg_ctl *cp)
+control_write_data_transaction (uint8_t *buf, uint16_t count)
 {
   int r;
 
@@ -548,7 +569,7 @@ control_write_data_transaction (uint8_t *buf, uint16_t count, struct usbip_msg_c
 	memcpy (usbc_ep0.buf, buf, count);
 	usbc_ep0.len = count;
 	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_DATA_TRANSFER, cp->ep, cp->dir);
+	notify_device (USB_INTR_DATA_TRANSFER, msg_ctl.ep, msg_ctl.dir);
 	r = 0;
 	break;
       }
@@ -569,7 +590,7 @@ control_write_data_transaction (uint8_t *buf, uint16_t count, struct usbip_msg_c
  *         \----------> Error
  */
 static int
-control_write_status_transaction (struct usbip_msg_ctl *cp)
+control_write_status_transaction (void)
 {
   int r;
 
@@ -582,7 +603,7 @@ control_write_status_transaction (struct usbip_msg_ctl *cp)
 	if (usbc_ep0.len != 0)
 	  fprintf (stderr, "*** ACK length %d\n", usbc_ep0.len);
 	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_DATA_TRANSFER, cp->ep, cp->dir);
+	notify_device (USB_INTR_DATA_TRANSFER, msg_ctl.ep, msg_ctl.dir);
 	r = 0;
 	break;
       }
@@ -596,7 +617,7 @@ control_write_status_transaction (struct usbip_msg_ctl *cp)
 }
 
 static int
-control_read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+control_read_data_transaction (void)
 {
 }
 
@@ -608,7 +629,7 @@ control_read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
  *                     \----------> Error
  */
 static int
-control_read_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+control_read_status_transaction (void)
 {
   int r;
 
@@ -620,7 +641,7 @@ control_read_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
       {
 	usbc_ep0.len = 0;
 	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_DATA_TRANSFER, cp->ep, cp->dir);
+	notify_device (USB_INTR_DATA_TRANSFER, msg_ctl.ep, msg_ctl.dir);
 	r = 0;
 	break;
       }
@@ -634,12 +655,12 @@ control_read_status_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
 }
 
 static int
-write_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+write_data_transaction (void)
 {
 }
 
 static int
-read_data_transaction (int fd, uint32_t seq, struct usbip_msg_ctl *cp)
+read_data_transaction (void)
 {
 }
 
