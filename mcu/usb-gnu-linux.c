@@ -850,8 +850,8 @@ int
 usb_lld_ctrl_ack (struct usb_dev *dev)
 {
   dev->state = WAIT_STATUS_IN;
-  usbc_ep0.tx_count = 0;
-  usbc_ep0.status_flag = EP_TX_VALID;
+  usbc_ep0.len = 0;
+  usbc_ep0.state = USB_STATE_TX;
   notify_usbip ();
   return USB_EVENT_OK;
 }
@@ -863,7 +863,7 @@ usb_lld_ctrl_recv (struct usb_dev *dev, void *p, size_t len)
   data_p->addr = p;
   data_p->len = len;
   dev->state = OUT_DATA;
-  usbc_ep0.status_flag = EP_RX_VALID;
+  usbc_ep0.state = USB_STATE_RX;
   notify_usbip ();
   return USB_EVENT_OK;
 }
@@ -898,12 +898,13 @@ usb_lld_ctrl_send (struct usb_dev *dev, const void *buf, size_t buflen)
 
   if (len)
     {
-      memcpy (usbc_ep0.tx_data, data_p->addr, len);
+      memcpy (usbc_ep0.buf, data_p->addr, len);
       data_p->len -= len;
       data_p->addr += len;
     }
 
-  usbc_ep0.status_flag = EP_TX_VALID;
+  usbc_ep0.len = len;
+  usbc_ep0.state = USB_STATE_TX;
   notify_usbip ();
   return USB_EVENT_OK;
 }
