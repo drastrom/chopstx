@@ -80,9 +80,14 @@ struct usb_controller {
   uint8_t ep;
 };
 
+static struct usb_controller usbc;
+
 static void
 notify_device (uint8_t intr, uint8_t dir, uint8_t ep)
 {
+  usbc.intr = intr;
+  usbc.dir = dir;
+  usbc.ep = ep;
   pthread_kill (tid_main, SIGUSR1);
 }
 
@@ -169,9 +174,9 @@ static char usb_data[URB_DATA_SIZE];
 static char *usb_data_p;
 
 static int control_setup_transaction (void);
-static int control_write_data_transaction (uint8_t *buf, uint16_t count);
+static int control_write_data_transaction (char *buf, uint16_t count);
 static int control_write_status_transaction (void);
-static int control_read_data_transaction (void);
+static int control_read_data_transaction (char *buf);
 static int control_read_status_transaction (void);
 static int write_data_transaction (void);
 static int read_data_transaction (void);
@@ -216,7 +221,7 @@ handle_control_urb (void)
       usb_data_p = usb_data;
       while (r == 0)
 	{
-	  r = control_read_data_transaction (usb_data_p, 64);
+	  r = control_read_data_transaction (usb_data_p);
 	  if (r < 0)
 	    break;
 
@@ -511,7 +516,7 @@ static struct usb_control usbc_ep5_out;
 static struct usb_control usbc_ep6_out;
 static struct usb_control usbc_ep7_out;
 
-/* Emulate Control setup transaction.
+/** Control setup transaction.
  *
  * -->[SETUP]-->[DATA0]-->{ACK}-> Success
  *                      \-------> Error
@@ -548,7 +553,7 @@ control_setup_transaction (void)
   return r;
 }
 
-/* Emulate OUT transaction.
+/** Control WRITE transaction.
  *
  * -->[OUT]-->[DATA0]---->{ACK}---> Success
  *                     \--{NAK}---> again
@@ -556,7 +561,7 @@ control_setup_transaction (void)
  *                     \----------> Error
  */
 static int
-control_write_data_transaction (uint8_t *buf, uint16_t count)
+control_write_data_transaction (char *buf, uint16_t count)
 {
   int r;
 
@@ -582,7 +587,7 @@ control_write_data_transaction (uint8_t *buf, uint16_t count)
   return r;
 }
 
-/* Emulate status transaction for WRITE.
+/** Status transaction for control WRITE.
  *            zero-len
  * -->[IN]--->{DATA0}->[ACK]---> Success
  *         \--{NAK}---> again
@@ -616,12 +621,50 @@ control_write_status_transaction (void)
   return r;
 }
 
+/** Control READ transaction.
+ *
+ * -->[IN]-->{DATAx}---->[ACK]---> Success
+ *         |          \---------> Error
+ *         \-{STALL}------------> Error
+ *         \-{NAK}--------------> again
+ */
 static int
-control_read_data_transaction (void)
+control_read_data_transaction (char *buf)
 {
+  int r;
+  uint16_t count;
+
+  pthread_mutex_lock (&usbc_ep0.mutex);
+  while (1)
+    if (&usbc_ep0.state == USB_STATE_NAK)
+      pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
+    else if (&usbc_ep0.state == USB_STATE_TX)
+      {
+	if (usbc_ep0.len > 64)
+	  {
+	    fprintf (stderr, "*** length %d\n", usbc_ep0.len);
+	    r = -1;
+	  }
+	else
+	  {
+	    count = usbc_ep0.len;
+	    memcpy (buf, usbc_ep0.buf, count);
+	    usbc_ep0.state = USB_STATE_NAK;
+	    notify_device (USB_INTR_DATA_TRANSFER, msg_ctl.ep, msg_ctl.dir);
+	    r = count;
+	  }
+	break;
+      }
+    else
+      {
+	r = -1;
+	break;
+      }
+  pthread_mutex_unlock (&usbc_ep0.mutex);
+  return r;
 }
 
-/* Emulate status transaction for READ.
+/* Status transaction for control READ.
  *            zero-len
  * -->[OUT]--->[DATA0]--->{ACK}---> Success
  *                     \--{NAK}---> again
