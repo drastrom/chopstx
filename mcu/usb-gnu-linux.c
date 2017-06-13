@@ -49,17 +49,21 @@ static pthread_t tid_usbip;
 #define CMD_URB        0x00000001
 #define CMD_DETACH     0x00000002
 
+#define RET_URB        0x00000003
+
 struct usbip_msg_head {
   uint32_t cmd;
   uint32_t seq;
 };
 
-#define USBIP_REPLY_HEADER_SIZE 12
+#define USBIP_REPLY_HEADER_SIZE 8
 #define DEVICE_INFO_SIZE        (256+32+12+6+6)
 #define INTERFACE_INFO_SIZE     4
-#define DEVICE_LIST_SIZE        (USBIP_REPLY_HEADER_SIZE+DEVICE_INFO_SIZE*1+INTERFACE_INFO_SIZE*1)
+#define DEVICE_LIST_SIZE        (DEVICE_INFO_SIZE*1+INTERFACE_INFO_SIZE*1)
 
-#define USBIP_REPLY_DEVICE_LIST "\x01\x11\x00\x05"
+#define USBIP_REPLY_DEVICE_LIST "\x01\x11\x00\x02"
+#define USBIP_REPLY_ATTACH      "\x01\x11\x00\x03"
+
 #define NETWORK_UINT32_ZERO     "\x00\x00\x00\x00"
 #define NETWORK_UINT32_ONE      "\x00\x00\x00\x01"
 #define NETWORK_UINT32_TWO      "\x00\x00\x00\x02"
@@ -91,31 +95,18 @@ notify_device (uint8_t intr, uint8_t dir, uint8_t ep)
   pthread_kill (tid_main, SIGUSR1);
 }
 
+#define MY_BUS_ID "1-1\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
+
 static char *
-list_devices (size_t *len_p)
+fill_device_info (char *p)
 {
-  char *p0, *p;
-
-  *len_p = 0;
-  p0 = malloc (DEVICE_LIST_SIZE);
-  if (p0 == NULL)
-    return NULL;
-
-  *len_p = DEVICE_LIST_SIZE;
-
-  p = p0;
-  memcpy (p, USBIP_REPLY_DEVICE_LIST, 4);
-  p += 4;
-  memcpy (p, NETWORK_UINT32_ZERO, 4);
-  p += 4;
-  memcpy (p, NETWORK_UINT32_ONE, 4);
-  p += 4;
   memset (p, 0, 256);
   strcpy (p, "/sys/devices/pci0000:00/0000:00:01.1/usb1/1-1");
   p += 256;
-  memset (p, 0, 32);
-  strcpy (p, "1-1");
+
+  memcpy (p, MY_BUS_ID, 32);
   p += 32;
+
   memcpy (p, NETWORK_UINT32_ONE, 4); /* Bus */
   p += 4;
   memcpy (p, NETWORK_UINT32_TWO, 4); /* Dev */
@@ -133,8 +124,25 @@ list_devices (size_t *len_p)
   *p++ = 0; /* bDeviceSubClass     */
   *p++ = 0; /* bDeviceProtocol     */
   *p++ = 0; /* bConfigurationValue */
-  *p++ = 1; /* bConfigurationValue */
+  *p++ = 1; /* bNumConfigurations  */
   *p++ = 1; /* bNumInterfaces      */
+
+  return p;
+}
+
+static char *
+list_devices (size_t *len_p)
+{
+  char *p0, *p;
+
+  *len_p = 0;
+  p0 = malloc (DEVICE_LIST_SIZE);
+  if (p0 == NULL)
+    return NULL;
+
+  *len_p = DEVICE_LIST_SIZE;
+
+  p = fill_device_info (p0);
 
   *p++ = 11; /* bInterfaceClass    */
   *p++ = 0;  /* bInterfaceSubClass */
@@ -147,10 +155,20 @@ list_devices (size_t *len_p)
 static char *
 attach_device (char busid[32], size_t *len_p)
 {
-  (void)busid;
+  char *p0, *p;
 
   *len_p = 0;
-  return NULL;
+  if (memcmp (busid, MY_BUS_ID, 32) != 0) 
+    return NULL;
+
+  p0 = malloc (DEVICE_INFO_SIZE);
+  if (p0 == NULL)
+    return NULL;
+
+  p = fill_device_info (p0);
+
+  *len_p = p - p0;
+  return p0;
 }
 
 #define URB_DATA_SIZE 65536
@@ -216,7 +234,7 @@ handle_control_urb (void)
     }
   else
     {				/* Input from device to host.  */
-      uint16_t count = 0;
+      int count = 0;
 
       usb_data_p = usb_data;
       while (r == 0)
@@ -247,6 +265,8 @@ handle_control_urb (void)
 static int
 handle_data_urb  (void)
 {
+  int r;
+
   if (msg_ctl.dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
       while (r == 0)
@@ -261,13 +281,16 @@ handle_data_urb  (void)
   return r;
 }
 
-static int
-handle_urb (void)
+static void
+handle_urb (int fd, uint32_t seq)
 {
+  int r = 0;
+
   if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
     {
       perror ("msg recv ctl");
-      return -1;
+      r = -1;
+      goto leave;
     }
 
   msg_ctl.devid = ntohl (msg_ctl.devid);
@@ -279,7 +302,8 @@ handle_urb (void)
   if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
     {
       perror ("msg recv setup");
-      return -1;
+      r = -1;
+      goto leave;
     }
 
   usb_data_p = usb_data;
@@ -289,20 +313,60 @@ handle_urb (void)
       if (msg_ctl.len > URB_DATA_SIZE)
 	{
 	  perror ("msg len too long");
-	  return -1;
+	  r = -1;
+	  goto leave;
 	}
 
       if (recv (fd, usb_data, msg_ctl.len, 0) != msg_ctl.len)
 	{
 	  perror ("msg recv data");
-	  return -1;
+	  r = -1;
+	  goto leave;
 	}
     }
 
-  if (ep == 0)
-    return handle_control_urb ();
+  if (msg_ctl.ep == 0)
+    r = handle_control_urb ();
   else
-    return handle_data_urb ();
+    r = handle_data_urb ();
+
+ leave:
+  if (r < 0)
+    msg_ctl.flags_status = htonl (1);
+  else
+    msg_ctl.flags_status = 0;
+
+  {
+    struct usbip_msg_head msg;
+    int dir = msg_ctl.dir;
+    int len = msg_ctl.len;
+
+    msg.cmd = htonl (RET_URB);
+    msg.seq = htonl (seq);
+
+    if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
+      {
+	perror ("reply send");
+      }
+
+    msg_ctl.devid = htonl (msg_ctl.devid);
+    msg_ctl.dir = htonl (msg_ctl.dir);
+    msg_ctl.ep = htonl (msg_ctl.ep);
+    msg_ctl.len = htonl (msg_ctl.len);
+
+    if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+      {
+	perror ("reply send");
+      }
+
+    if (dir == USBIP_DIR_IN && len)
+      {
+	if (send (fd, usb_data, len, 0) != len)
+	  {
+	    perror ("reply send");
+	  }
+      }
+  }
 }
 
 static pthread_mutex_t comm_mutex;
@@ -324,11 +388,33 @@ notify_usbip (void)
   pthread_mutex_unlock (&comm_mutex);
 }
 
+static void
+send_reply (int fd, char *reply, int ok)
+{
+  char buf[8];
+  char *p = buf;
+
+  memcpy (p, reply, 4);
+  p += 4;
+  if (ok)
+    memcpy (p, NETWORK_UINT32_ZERO, 4);
+  else
+    memcpy (p, NETWORK_UINT32_ONE, 4);
+  p += 4;
+
+  if ((size_t)send (fd, buf, 8, 0) != 8)
+    {
+      perror ("reply send");
+    }
+}
+
 /*
- * In the USBIP protocol, it sends URB (USB Request Block) to this server. 
+ * In the USBIP protocol, client sends URB (USB Request Block) to this
+ * server.
  *
- * This server acts/emulates as a USB host controller, and
- * transforms URB into packets and packets into URB.
+ * This server acts/emulates as a USB host controller, and transforms
+ * URB into packets to device, transforms packets from device into
+ * URB.
  */
 static void *
 run_server (void *arg)
@@ -384,6 +470,7 @@ run_server (void *arg)
       for (;;)
         {
 	  struct usbip_msg_head msg;
+	  char busid[32];
 
 	  if (recv (fd, (char *)&msg, sizeof (msg), 0) != sizeof (msg))
 	    {
@@ -399,6 +486,12 @@ run_server (void *arg)
 	      char *device_list;
 	      size_t device_list_size;
 
+	      if (recv (fd, busid, 32, 0) != 32)
+		{
+		  perror ("msg recv");
+		  break;
+		}
+
 	      if (attached)
 		{
 		  fprintf (stderr, "REQ list while attached\n");
@@ -407,7 +500,10 @@ run_server (void *arg)
 
 	      device_list = list_devices (&device_list_size);
 
-	      if ((size_t)send (fd, device_list, device_list_size, 0) != device_list_size)
+	      send_reply (fd, USBIP_REPLY_DEVICE_LIST, !!device_list);
+
+	      if ((size_t)send (fd, device_list, device_list_size, 0)
+		  != device_list_size)
 		{
 		  perror ("list send");
 		  break;
@@ -417,7 +513,6 @@ run_server (void *arg)
 	    }
 	  else if (msg.cmd == CMD_REQ_ATTACH)
 	    {
-	      char busid[32];
 	      char *attach;
 	      size_t attach_size;
 
@@ -434,14 +529,17 @@ run_server (void *arg)
 		}
 
 	      attach = attach_device (busid, &attach_size);
-	      if ((size_t)send (fd, attach, attach_size, 0) != attach_size)
+	      send_reply (fd, USBIP_REPLY_ATTACH, !!attach);
+	      if (attach)
 		{
-		  perror ("list send");
-		  break;
+		  if ((size_t)send (fd, attach, attach_size, 0) != attach_size)
+		    {
+		      perror ("list send");
+		      break;
+		    }
+		  free (attach);
+		  attached = 1;
 		}
-
-	      free (attach);
-	      attached = 1;
 	    }
 	  else if (msg.cmd == CMD_URB)
 	    {
@@ -451,13 +549,9 @@ run_server (void *arg)
 		  break;
 		}
 
-	      if (handle_urb () < 0)
-		{
-		  fprintf (stderr, "URB handling failed\n");
-		  break;
-		}
+	      handle_urb (fd, msg.seq);
 	    }
-	  else if(msg.cmd == CMD_DETACH)
+	  else if (msg.cmd == CMD_DETACH)
 	    {
 	      if (!attached)
 		{
@@ -528,9 +622,9 @@ control_setup_transaction (void)
 
   pthread_mutex_lock (&usbc_ep0.mutex);
   while (1)
-    if (&usbc_ep0.state == USB_STATE_NAK)
+    if (usbc_ep0.state == USB_STATE_NAK)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
-    else if (&usbc_ep0.state == USB_STATE_SETUP)
+    else if (usbc_ep0.state == USB_STATE_SETUP)
       {
 	memcpy (usbc_ep0.buf, usb_setup, sizeof (usb_setup));
 	usbc_ep0.len = sizeof (usb_setup);
@@ -567,9 +661,9 @@ control_write_data_transaction (char *buf, uint16_t count)
 
   pthread_mutex_lock (&usbc_ep0.mutex);
   while (1)
-    if (&usbc_ep0.state == USB_STATE_NAK)
+    if (usbc_ep0.state == USB_STATE_NAK)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
-    else if (&usbc_ep0.state == USB_STATE_RX)
+    else if (usbc_ep0.state == USB_STATE_RX)
       {
 	memcpy (usbc_ep0.buf, buf, count);
 	usbc_ep0.len = count;
@@ -601,9 +695,9 @@ control_write_status_transaction (void)
 
   pthread_mutex_lock (&usbc_ep0.mutex);
   while (1)
-    if (&usbc_ep0.state == USB_STATE_NAK)
+    if (usbc_ep0.state == USB_STATE_NAK)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
-    else if (&usbc_ep0.state == USB_STATE_TX)
+    else if (usbc_ep0.state == USB_STATE_TX)
       {
 	if (usbc_ep0.len != 0)
 	  fprintf (stderr, "*** ACK length %d\n", usbc_ep0.len);
@@ -636,9 +730,9 @@ control_read_data_transaction (char *buf)
 
   pthread_mutex_lock (&usbc_ep0.mutex);
   while (1)
-    if (&usbc_ep0.state == USB_STATE_NAK)
+    if (usbc_ep0.state == USB_STATE_NAK)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
-    else if (&usbc_ep0.state == USB_STATE_TX)
+    else if (usbc_ep0.state == USB_STATE_TX)
       {
 	if (usbc_ep0.len > 64)
 	  {
@@ -678,9 +772,9 @@ control_read_status_transaction (void)
 
   pthread_mutex_lock (&usbc_ep0.mutex);
   while (1)
-    if (&usbc_ep0.state == USB_STATE_NAK)
+    if (usbc_ep0.state == USB_STATE_NAK)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
-    else if (&usbc_ep0.state == USB_STATE_RX)
+    else if (usbc_ep0.state == USB_STATE_RX)
       {
 	usbc_ep0.len = 0;
 	usbc_ep0.state = USB_STATE_NAK;
@@ -700,11 +794,13 @@ control_read_status_transaction (void)
 static int
 write_data_transaction (void)
 {
+  return 0;
 }
 
 static int
 read_data_transaction (void)
 {
+  return 0;
 }
 
 void
