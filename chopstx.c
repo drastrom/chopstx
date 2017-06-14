@@ -500,20 +500,10 @@ chx_timer_expired (void)
 static struct chx_queue q_intr;
 
 
-static uint32_t irq_num;
-
-static uint32_t
-chx_get_irq_number (void)
-{
-  return irq_num;
-}
-
-
 void
-chx_handle_intr (void)
+chx_handle_intr (uint32_t irq_num)
 {
   struct chx_pq *p;
-  uint32_t irq_num = chx_get_irq_number ();
 
   chx_disable_intr (irq_num);
   chx_spin_lock (&q_intr.lock);

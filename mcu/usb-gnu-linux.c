@@ -65,12 +65,13 @@ struct usbip_usb_device {
   uint32_t speed;
 
   uint16_t idVendor;
-  uint16_t IdProduct;
+  uint16_t idProduct;
   uint16_t bcdDevice;
 
   uint8_t bDeviceClass;
   uint8_t bDeviceSubClass;
   uint8_t bDeviceProtocol;
+
   uint8_t bConfigurationValue;
   uint8_t bNumConfigurations;
   uint8_t bNumInterfaces;
@@ -81,26 +82,50 @@ struct usbip_usb_device {
  */
 static struct usbip_usb_device usbip_usb_device;
 
+static const char *issue_get_desc (void);
+
 static void
 refresh_usb_device (void)
 {
-  /* Issue device descriptor request, and fill usbip_usb_device.  */
+  const char *desc;
 
-  /* 1: size=18 (or follows more desc) */
+  /* Issue device descriptor request, and fill usbip_usb_device.  */
+  desc = issue_get_desc ();
+
+  memset (usbip_usb_device.path, 0, 256);
+  strcpy (usbip_usb_device.path,
+	  "/sys/devices/pci0000:00/0000:00:01.1/usb1/1-1");
+  memcpy (usbip_usb_device.busid, MY_BUS_ID, 32);
+
+  usbip_usb_device.busnum = 0;
+  usbip_usb_device.devnum = 0;
+  usbip_usb_device.speed =  htonl (1);
+  /* 0: size=18 (or follows more desc) */
   /* 1: DEVICE_DESCRIPTOR */
   /* 2: bcdUSB: ignore or use for speed? */
-  /* 1: bDeviceClass */ /* COPY */
-  /* 1: bDeviceSubClass */ /* COPY */
-  /* 1: bDeviceProtocol */ /* COPY */
-  /* 1: bMaxPacketSize: ignore */
-  /* 2: idVendor */  /* COPY */
-  /* 2: idProduct */ /* COPY */
-  /* 2: bcdDevice */ /* COPY */
-  /* 1: iManufacturer: ignore */
-  /* 1: iProduct: ignore */
-  /* 1: iSerialNumber: ignore */
-  /* 1: bNumConfigurations */ /* COPY */
+  /* 4: bDeviceClass */
+  /* 5: bDeviceSubClass */
+  /* 6: bDeviceProtocol */
+  /* 7: bMaxPacketSize: ignore */
+  /* 8: idVendor */
+  /* 10: idProduct */
+  /* 12: bcdDevice */
+  /* 14: iManufacturer: ignore */
+  /* 15: iProduct: ignore */
+  /* 16: iSerialNumber: ignore */
+  /* 17: bNumConfigurations */
   /* ... */
+  usbip_usb_device.idVendor = htonh (((desc[8] << 8)|desc[9]));
+  usbip_usb_device.idProduct = htonh (((desc[10] << 8)|desc[11]));
+  usbip_usb_device.bcdDevice = htonh (((desc[12] << 8)|desc[13]));
+
+  usbip_usb_device.bDeviceClass = desc[4];
+  usbip_usb_device.bDeviceSubClass = desc[5];
+  usbip_usb_device.bDeviceProtocol = desc[6];
+
+  usbip_usb_device.bConfigurationValue = 0;
+  usbip_usb_device.bNumConfigurations = desc[17];
+  usbip_usb_device.bNumInterfaces = 0;
 }
 
 #define USBIP_REPLY_HEADER_SIZE 8
@@ -144,59 +169,15 @@ notify_device (uint8_t intr, uint8_t dir, uint8_t ep)
 
 #define MY_BUS_ID "1-1\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
-static char *
-fill_device_info (char *p)
-{
-  memset (p, 0, 256);
-  strcpy (p, "/sys/devices/pci0000:00/0000:00:01.1/usb1/1-1");
-  p += 256;
-
-  memcpy (p, MY_BUS_ID, 32);
-  p += 32;
-
-  memcpy (p, NETWORK_UINT32_ZERO, 4); /* Bus */
-  p += 4;
-  memcpy (p, NETWORK_UINT32_ZERO, 4); /* Dev */
-  p += 4;
-  memcpy (p, NETWORK_UINT32_ONE, 4); /* Speed */
-  p += 4;
-  memcpy (p, NETWORK_UINT16_FSIJ, 2);
-  p += 2;
-  memcpy (p, NETWORK_UINT16_ZERO, 2); /* Gnuk */
-  p += 2;
-  memcpy (p, NETWORK_UINT16_ONE_ONE, 2); /* USB 1.1 */
-  p += 2;
-
-  *p++ = 0; /* bDeviceClass        */
-  *p++ = 0; /* bDeviceSubClass     */
-  *p++ = 0; /* bDeviceProtocol     */
-
-  *p++ = 0; /* bConfigurationValue */
-  *p++ = 1; /* bNumConfigurations  */
-  *p++ = 0; /* bNumInterfaces, little sense to fill (only for user output)*/
-
-  return p;
-}
-
-static char *
+static const char *
 list_devices (size_t *len_p)
 {
-  char *p0, *p;
-
-  *len_p = 0;
-  p0 = malloc (DEVICE_LIST_SIZE);
-  if (p0 == NULL)
-    return NULL;
-
-  *len_p = DEVICE_LIST_SIZE;
-
-  p = fill_device_info (p0);
-  /* Don't send interface information, that's no problem for a single device.  */
-
-  return p0;
+  refresh_usb_device ();
+  *len_p = sizeof (usbip_usb_device);
+  return (const char *)&usbip_usb_device;
 }
 
-static char *
+static const char *
 attach_device (char busid[32], size_t *len_p)
 {
   char *p0, *p;
@@ -207,14 +188,9 @@ attach_device (char busid[32], size_t *len_p)
 
   notify_device (USB_INTR_RESET, 0, 0);
 
-  p0 = malloc (DEVICE_INFO_SIZE);
-  if (p0 == NULL)
-    return NULL;
-
-  p = fill_device_info (p0);
-
-  *len_p = p - p0;
-  return p0;
+  refresh_usb_device ();
+  *len_p = sizeof (usbip_usb_device);
+  return (const char *)&usbip_usb_device;
 }
 
 #define URB_DATA_SIZE 65536
@@ -327,6 +303,29 @@ handle_data_urb  (void)
   return r;
 }
 
+#define USB_REQ_GET_DESCRIPTOR		0x06
+
+static const char *
+issue_get_desc (void)
+{
+  msg_ctl.devid = 0;
+  msg_ctl.dir = USBIP_DIR_IN;
+  msg_ctl.ep = 0;
+  msg_ctl.flags_status = 0;
+  msg_ctl.len = 63;
+  usb_setp[0] = 0x80;		        /* Type: GET, Standard, DEVICE */
+  usb_setp[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
+  usb_setp[2] = 0;			/* Value H: device desc */
+  usb_setp[3] = 0;			/* Value L: 0 */
+  usb_setp[4] = 0;              	/* Index */
+  usb_setp[5] = 0;
+  usb_setp[6] = 0;		        /* Length */
+  usb_setp[7] = 63;
+  usb_data_p = usb_data;
+  handle_control_urb ();
+  return (const char *)usb_data;
+}
+
 static void
 handle_urb (int fd, uint32_t seq)
 {
@@ -399,6 +398,7 @@ handle_urb (int fd, uint32_t seq)
     msg_ctl.dir = htonl (msg_ctl.dir);
     msg_ctl.ep = htonl (msg_ctl.ep);
     msg_ctl.len = htonl (msg_ctl.len);
+    msg_ctl.err_cnt = 0;
 
     if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
       {
@@ -529,7 +529,7 @@ run_server (void *arg)
 
 	  if (msg.cmd == CMD_REQ_LIST)
 	    {
-	      char *device_list;
+	      const char *device_list;
 	      size_t device_list_size;
 
 	      if (recv (fd, busid, 32, 0) != 32)
@@ -548,7 +548,6 @@ run_server (void *arg)
 
 	      send_reply (fd, USBIP_REPLY_DEVICE_LIST, !!device_list);
 
-
 	      if (send (fd, NETWORK_UINT32_ONE, 4, 0) != 4)
 		{
 		  perror ("list send");
@@ -561,12 +560,10 @@ run_server (void *arg)
 		  perror ("list send");
 		  break;
 		}
-
-	      free (device_list);
 	    }
 	  else if (msg.cmd == CMD_REQ_ATTACH)
 	    {
-	      char *attach;
+	      const char *attach;
 	      size_t attach_size;
 
 	      if (attached)
@@ -590,7 +587,6 @@ run_server (void *arg)
 		      perror ("list send");
 		      break;
 		    }
-		  free (attach);
 		  attached = 1;
 		}
 	    }
@@ -856,22 +852,49 @@ read_data_transaction (void)
   return 0;
 }
 
+void chx_handle_intr (uint32_t irq_num);
+
+#define INTR_REQ_USB 20
+
+static void
+usb_intr (int signum)
+{
+  (void)signum;
+  chx_handle_intr (INTR_REQ_USB);
+}
+
+
 void
 usb_lld_init (struct usb_dev *dev, uint8_t feature)
 {
   int r;
+  sigset_t sigset;
+  struct sigaction act;
+
+  sigemptyset (&sigset);
+  sigaddset (&sigset, SIGUSR1);
 
   /*
    * Launch the thread for USBIP.  This maps to usb_lld_sys_init where
    * we initialize USB controller on MCU.
    */
   tid_main = pthread_self ();
+
+  pthread_sigmask (SIG_BLOCK, &sigset, NULL);
+
   r = pthread_create (&tid_usbip, NULL, run_server, NULL);
   if (r)
     {
       fprintf (stderr, "usb_lld_init: %s\n", strerror (r));
       exit (1);
     }
+
+  act.sa_handler = usb_intr;
+  sigemptyset (&act.sa_mask);
+  act.sa_flags = 0;
+  sigaction (SIGUSR1, &act, NULL);
+
+  pthread_sigmask (SIG_UNBLOCK, &sigset, NULL);
 
   dev->configuration = 0;
   dev->feature = feature;
