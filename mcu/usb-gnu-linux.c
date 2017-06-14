@@ -205,6 +205,8 @@ attach_device (char busid[32], size_t *len_p)
   if (memcmp (busid, MY_BUS_ID, 32) != 0) 
     return NULL;
 
+  notify_device (USB_INTR_RESET, 0, 0);
+
   p0 = malloc (DEVICE_INFO_SIZE);
   if (p0 == NULL)
     return NULL;
