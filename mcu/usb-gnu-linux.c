@@ -56,10 +56,57 @@ struct usbip_msg_head {
   uint32_t seq;
 };
 
+struct usbip_usb_device {
+  char path[256];
+  char busid[32];
+
+  uint32_t busnum;
+  uint32_t devnum;
+  uint32_t speed;
+
+  uint16_t idVendor;
+  uint16_t IdProduct;
+  uint16_t bcdDevice;
+
+  uint8_t bDeviceClass;
+  uint8_t bDeviceSubClass;
+  uint8_t bDeviceProtocol;
+  uint8_t bConfigurationValue;
+  uint8_t bNumConfigurations;
+  uint8_t bNumInterfaces;
+} __attribute__((packed));
+
+/*
+ * Only support a single device.
+ */
+static struct usbip_usb_device usbip_usb_device;
+
+static void
+refresh_usb_device (void)
+{
+  /* Issue device descriptor request, and fill usbip_usb_device.  */
+
+  /* 1: size=18 (or follows more desc) */
+  /* 1: DEVICE_DESCRIPTOR */
+  /* 2: bcdUSB: ignore or use for speed? */
+  /* 1: bDeviceClass */ /* COPY */
+  /* 1: bDeviceSubClass */ /* COPY */
+  /* 1: bDeviceProtocol */ /* COPY */
+  /* 1: bMaxPacketSize: ignore */
+  /* 2: idVendor */  /* COPY */
+  /* 2: idProduct */ /* COPY */
+  /* 2: bcdDevice */ /* COPY */
+  /* 1: iManufacturer: ignore */
+  /* 1: iProduct: ignore */
+  /* 1: iSerialNumber: ignore */
+  /* 1: bNumConfigurations */ /* COPY */
+  /* ... */
+}
+
 #define USBIP_REPLY_HEADER_SIZE 8
 #define DEVICE_INFO_SIZE        (256+32+12+6+6)
 #define INTERFACE_INFO_SIZE     4
-#define DEVICE_LIST_SIZE        (DEVICE_INFO_SIZE*1+INTERFACE_INFO_SIZE*1)
+#define DEVICE_LIST_SIZE        (DEVICE_INFO_SIZE*1)
 
 #define USBIP_REPLY_DEVICE_LIST "\x01\x11\x00\x02"
 #define USBIP_REPLY_ATTACH      "\x01\x11\x00\x03"
@@ -107,9 +154,9 @@ fill_device_info (char *p)
   memcpy (p, MY_BUS_ID, 32);
   p += 32;
 
-  memcpy (p, NETWORK_UINT32_ONE, 4); /* Bus */
+  memcpy (p, NETWORK_UINT32_ZERO, 4); /* Bus */
   p += 4;
-  memcpy (p, NETWORK_UINT32_TWO, 4); /* Dev */
+  memcpy (p, NETWORK_UINT32_ZERO, 4); /* Dev */
   p += 4;
   memcpy (p, NETWORK_UINT32_ONE, 4); /* Speed */
   p += 4;
@@ -123,9 +170,10 @@ fill_device_info (char *p)
   *p++ = 0; /* bDeviceClass        */
   *p++ = 0; /* bDeviceSubClass     */
   *p++ = 0; /* bDeviceProtocol     */
+
   *p++ = 0; /* bConfigurationValue */
   *p++ = 1; /* bNumConfigurations  */
-  *p++ = 1; /* bNumInterfaces      */
+  *p++ = 0; /* bNumInterfaces, little sense to fill (only for user output)*/
 
   return p;
 }
@@ -143,11 +191,7 @@ list_devices (size_t *len_p)
   *len_p = DEVICE_LIST_SIZE;
 
   p = fill_device_info (p0);
-
-  *p++ = 11; /* bInterfaceClass    */
-  *p++ = 0;  /* bInterfaceSubClass */
-  *p++ = 0;  /* bInterfaceProtocol */
-  *p++ = 0;  /* ----pad----------- */
+  /* Don't send interface information, that's no problem for a single device.  */
 
   return p0;
 }
@@ -501,6 +545,13 @@ run_server (void *arg)
 	      device_list = list_devices (&device_list_size);
 
 	      send_reply (fd, USBIP_REPLY_DEVICE_LIST, !!device_list);
+
+
+	      if (send (fd, NETWORK_UINT32_ONE, 4, 0) != 4)
+		{
+		  perror ("list send");
+		  break;
+		}
 
 	      if ((size_t)send (fd, device_list, device_list_size, 0)
 		  != device_list_size)
