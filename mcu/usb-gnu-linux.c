@@ -376,6 +376,7 @@ handle_urb (int fd, uint32_t seq)
   uint8_t ep;
   uint8_t dir;
   uint16_t len;
+  struct usbip_msg_head msg;
 
   if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
     {
@@ -387,6 +388,7 @@ handle_urb (int fd, uint32_t seq)
   dir = ntohl (msg_ctl.dir);
   ep = ntohl (msg_ctl.ep);
   len = ntohl (msg_ctl.len);
+  msg_ctl.len = 0;
 
   if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
     {
@@ -420,38 +422,33 @@ handle_urb (int fd, uint32_t seq)
     r = handle_data_urb (ep, dir, len);
 
  leave:
+  len = ntohl (msg_ctl.len);
+  msg.cmd = htonl (RET_URB);
+  msg.seq = htonl (seq);
+
+  msg_ctl.err_cnt = 0;
   if (r < 0)
     msg_ctl.flags_status = htonl (1);
   else
     msg_ctl.flags_status = 0;
 
-  {
-    struct usbip_msg_head msg;
+  if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
+    {
+      perror ("reply send");
+    }
 
-    len = ntohl (msg_ctl.len);
-    msg.cmd = htonl (RET_URB);
-    msg.seq = htonl (seq);
+  if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+    {
+      perror ("reply send");
+    }
 
-    if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
-      {
-	perror ("reply send");
-      }
-
-    msg_ctl.err_cnt = 0;
-
-    if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
-      {
-	perror ("reply send");
-      }
-
-    if (dir == USBIP_DIR_IN && len)
-      {
-	if (send (fd, usb_data, len, 0) != len)
-	  {
-	    perror ("reply send");
-	  }
-      }
-  }
+  if (dir == USBIP_DIR_IN && len)
+    {
+      if (send (fd, usb_data, len, 0) != len)
+	{
+	  perror ("reply send");
+	}
+    }
 }
 
 
