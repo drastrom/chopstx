@@ -625,7 +625,8 @@ run_server (void *arg)
 }
 
 enum {
-  USB_STATE_STALL = 0,
+  USB_STATE_DISABLED = 0,
+  USB_STATE_STALL,
   USB_STATE_NAK,
   USB_STATE_SETUP,
   USB_STATE_TX,
@@ -637,7 +638,7 @@ enum {
 
 struct usb_control {
   uint8_t state;
-  uint8_t buf[USB_MAX_PACKET_SIZE];
+  uint8_t *buf;
   uint16_t len;
   pthread_mutex_t mutex;
   pthread_cond_t cond;
@@ -663,16 +664,15 @@ control_setup_transaction (void)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
     else if (usbc_ep0.state == USB_STATE_SETUP)
       {
-	memcpy (usbc_ep0.buf, usb_setup, sizeof (usb_setup));
-	usbc_ep0.len = sizeof (usb_setup);
-	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_SETUP, 0, msg_ctl.dir);
 	if (msg_ctl.dir == USBIP_DIR_OUT
 	    && usb_setup[6] == 0 && usb_setup[6] == 7)
 	  /* Control Write Transfer with no data satage.  */
 	  r = 1;
 	else
 	  r = 0;
+
+	usbc_ep0.state = USB_STATE_NAK;
+	notify_device (USB_INTR_SETUP, 0, msg_ctl.dir);
 	break;
       }
     else
@@ -702,11 +702,19 @@ control_write_data_transaction (char *buf, uint16_t count)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex); /* Timed wait??? */
     else if (usbc_ep0.state == USB_STATE_RX)
       {
-	memcpy (usbc_ep0.buf, buf, count);
-	usbc_ep0.len = count;
-	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_DATA_TRANSFER, msg_ctl.ep, msg_ctl.dir);
-	r = 0;
+	if (usbc_ep0.len < count)
+	  {
+	    r = -1;
+	    usbc_ep0.state = USB_STATE_STALL;
+	  }
+	else
+	  {
+	    r = 0;
+	    usbc_ep0.state = USB_STATE_NAK;
+	    memcpy (usbc_ep0.buf, buf, count);
+	    usbc_ep0.len = count;
+	    notify_device (USB_INTR_DATA_TRANSFER, msg_ctl.ep, msg_ctl.dir);
+	  }
 	break;
       }
     else
@@ -935,35 +943,38 @@ usb_lld_event_handler (struct usb_dev *dev)
 
 static void handle_datastage_out (struct usb_dev *dev)
 {
-  if (dev->ctrl_data.addr && dev->ctrl_data.len)
-    {
-      uint32_t len = st103_get_rx_count (ENDP0);
+  struct ctrl_data *data_p = &dev->ctrl_data;
+  uint32_t len = usbc_ep0.len;
 
-      if (len > dev->ctrl_data.len)
-	len = dev->ctrl_data.len;
+  data_p->len -= len;
+  data_p->addr += len;
 
-      usb_lld_from_pmabuf (dev->ctrl_data.addr, st103_get_rx_addr (ENDP0), len);
-      dev->ctrl_data.len -= len;
-      dev->ctrl_data.addr += len;
-    }
+  len = data_p->len;
+  if (len > USB_MAX_PACKET_SIZE)
+    len = USB_MAX_PACKET_SIZE;
 
   if (dev->ctrl_data.len == 0)
     {
       dev->state = WAIT_STATUS_IN;
-      st103_set_tx_count (ENDP0, 0);
-      st103_ep_set_tx_status (ENDP0, EP_TX_VALID);
+      usbc_ep0.buf = usb_setup;
+      usbc_ep0.len = 0;
+      usbc_ep0.state = USB_STATE_TX;
+      notify_usbip ();
     }
   else
     {
       dev->state = OUT_DATA;
-      st103_ep_set_rx_status (ENDP0, EP_RX_VALID);
+      usbc_ep0.buf = data_p->addr;
+      usbc_ep0.len = len;
+      usbc_ep0.state = USB_STATE_RX;
+      notify_usbip ();
     }
 }
 
 static void handle_datastage_in (struct usb_dev *dev)
 {
-  uint32_t len = USB_MAX_PACKET_SIZE;;
   struct ctrl_data *data_p = &dev->ctrl_data;
+  uint32_t len = USB_MAX_PACKET_SIZE;
 
   if ((data_p->len == 0) && (dev->state == LAST_IN_DATA))
     {
@@ -972,14 +983,19 @@ static void handle_datastage_in (struct usb_dev *dev)
 	  data_p->require_zlp = 0;
 
 	  /* No more data to send.  Send empty packet */
-	  st103_set_tx_count (ENDP0, 0);
-	  st103_ep_set_tx_status (ENDP0, EP_TX_VALID);
+	  usbc_ep0.buf = usb_setup;
+	  usbc_ep0.len = 0;
+	  usbc_ep0.state = USB_STATE_TX;
+	  notify_usbip ();
 	}
       else
 	{
 	  /* No more data to send, proceed to receive OUT acknowledge.  */
 	  dev->state = WAIT_STATUS_OUT;
-	  st103_ep_set_rx_status (ENDP0, EP_RX_VALID);
+	  usbc_ep0.buf = usb_setup;
+	  usbc_ep0.len = 0;
+	  usbc_ep0.state = USB_STATE_RX;
+	  notify_usbip ();
 	}
 
       return;
@@ -990,11 +1006,13 @@ static void handle_datastage_in (struct usb_dev *dev)
   if (len > data_p->len)
     len = data_p->len;
 
-  usb_lld_to_pmabuf (data_p->addr, st103_get_tx_addr (ENDP0), len);
   data_p->len -= len;
   data_p->addr += len;
-  st103_set_tx_count (ENDP0, len);
-  st103_ep_set_tx_status (ENDP0, EP_TX_VALID);
+
+  usbc_ep0.buf = data_p->addr;
+  usbc_ep0.len = len;
+  usbc_ep0.state = USB_STATE_TX;
+  notify_usbip ();
 }
 
 typedef int (*HANDLER) (struct usb_dev *dev);
@@ -1005,11 +1023,12 @@ static int std_none (struct usb_dev *dev)
   return -1;
 }
 
+static uint16_t status_info;
+
 static int std_get_status (struct usb_dev *dev)
 {
   struct device_req *arg = &dev->dev_req;
   uint8_t rcp = (arg->type & RECIPIENT);
-  uint16_t status_info = 0;
 
   if (arg->value != 0 || arg->len != 2 || (arg->index >> 8) != 0
       || USB_SETUP_SET (arg->type))
@@ -1046,27 +1065,25 @@ static int std_get_status (struct usb_dev *dev)
     }
   else if (rcp == ENDPOINT_RECIPIENT)
     {
-      uint8_t endpoint = (arg->index & 0x0f);
+      uint8_t ep_num = (arg->index & 0x0f);
       uint16_t status;
 
-      if ((arg->index & 0x70) || endpoint == ENDP0)
+      if ((arg->index & 0x70) || ep_num == ENDP0)
 	return -1;
 
       if ((arg->index & 0x80))
 	{
-	  status = st103_ep_get_tx_status (endpoint);
-	  if (status == 0)		/* Disabled */
+	  if (usbc_ep_in[ep_num].state == USB_STATE_DISABLED)
 	    return -1;
-	  else if (status == EP_TX_STALL)
-	    status_info |= 1; /* IN Endpoint stalled */
+	  else if (usbc_ep_in[ep_num].state == USB_STATE_STALL)
+	    status_info |= 1;
 	}
       else
 	{
-	  status = st103_ep_get_rx_status (endpoint);
-	  if (status == 0)		/* Disabled */
+	  if (usbc_ep_out[ep_num].state == USB_STATE_DISABLED)
 	    return -1;
-	  else if (status == EP_RX_STALL)
-	    status_info |= 1; /* OUT Endpoint stalled */
+	  else if (usbc_ep_out[ep_num].state == USB_STATE_STALL)
+	    status_info |= 1;
 	}
 
       return usb_lld_ctrl_send (dev, &status_info, 2);
@@ -1096,28 +1113,29 @@ static int std_clear_feature (struct usb_dev *dev)
     }
   else if (rcp == ENDPOINT_RECIPIENT)
     {
-      uint8_t endpoint = (arg->index & 0x0f);
-      uint16_t status;
+      uint8_t ep_num = (arg->index & 0x0f);
 
       if (dev->configuration == 0)
 	return -1;
 
       if (arg->len != 0 || (arg->index >> 8) != 0
-	  || arg->value != FEATURE_ENDPOINT_HALT || endpoint == ENDP0)
+	  || arg->value != FEATURE_ENDPOINT_HALT || ep_num == ENDP0)
 	return -1;
 
       if ((arg->index & 0x80))
-	status = st103_ep_get_tx_status (endpoint);
+	{
+	  if (usbc_ep_in[ep_num].state == USB_STATE_DISABLED)
+	    return -1;
+
+	  usbc_ep_in[ep_num].state = USB_STATE_NAK;
+	}
       else
-	status = st103_ep_get_rx_status (endpoint);
+	{
+	  if (usbc_ep_out[ep_num].state == USB_STATE_DISABLED)
+	    return -1;
 
-      if (status == 0)		/* It's disabled endpoint.  */
-	return -1;
-
-      if (arg->index & 0x80)	/* IN endpoint */
-	st103_ep_clear_dtog_tx (endpoint);
-      else			/* OUT endpoint */
-	st103_ep_clear_dtog_rx (endpoint);
+	  usbc_ep_out[ep_num].state = USB_STATE_NAK;
+	}
 
       return USB_EVENT_CLEAR_FEATURE_ENDPOINT;
     }
@@ -1146,28 +1164,29 @@ static int std_set_feature (struct usb_dev *dev)
     }
   else if (rcp == ENDPOINT_RECIPIENT)
     {
-      uint8_t endpoint = (arg->index & 0x0f);
-      uint32_t status;
+      uint8_t ep_num = (arg->index & 0x0f);
 
       if (dev->configuration == 0)
 	return -1;
 
       if (arg->len != 0 || (arg->index >> 8) != 0
-	  || arg->value != FEATURE_ENDPOINT_HALT || endpoint == ENDP0)
+	  || arg->value != FEATURE_ENDPOINT_HALT || ep_num == ENDP0)
 	return -1;
 
       if ((arg->index & 0x80))
-	status = st103_ep_get_tx_status (endpoint);
+	{
+	  if (usbc_ep_in[ep_num].state == USB_STATE_DISABLED)
+	    return -1;
+
+	  usbc_ep_in[ep_num].state = USB_STATE_STALL;
+	}
       else
-	status = st103_ep_get_rx_status (endpoint);
+	{
+	  if (usbc_ep_out[ep_num].state == USB_STATE_DISABLED)
+	    return -1;
 
-      if (status == 0)		/* It's disabled endpoint.  */
-	return -1;
-
-      if (arg->index & 0x80)	/* IN endpoint */
-	st103_ep_set_tx_status (endpoint, EP_TX_STALL);
-      else			/* OUT endpoint */
-	st103_ep_set_rx_status (endpoint, EP_RX_STALL);
+	  usbc_ep_out[ep_num].state = USB_STATE_STALL;
+	}
 
       return USB_EVENT_SET_FEATURE_ENDPOINT;
     }
@@ -1270,8 +1289,6 @@ static int std_set_interface (struct usb_dev *dev)
 static int
 handle_setup0 (struct usb_dev *dev)
 {
-  const uint16_t *pw;
-  uint16_t w;
   uint8_t req_no;
   HANDLER handler;
 
@@ -1323,22 +1340,26 @@ static int handle_in0 (struct usb_dev *dev)
     handle_datastage_in (dev);
   else if (dev->state == WAIT_STATUS_IN)
     {
-      dev->state = WAIT_SETUP;
-
       if ((dev->dev_req.request == SET_ADDRESS) &&
 	  ((dev->dev_req.type & (REQUEST_TYPE | RECIPIENT))
 	   == (STANDARD_REQUEST | DEVICE_RECIPIENT)))
 	{
-	  /* XXX: record the address??? */
+	  /* XXX: record the assigned address of this device??? */
+	  printf ("Set Address: %d\n", dev->dev_req.value);
 	  r = USB_EVENT_DEVICE_ADDRESSED;
 	}
       else
 	r = USB_EVENT_CTRL_WRITE_FINISH;
+      dev->state = WAIT_SETUP;
+      usbc_ep0.buf = usb_setup;
+      usbc_ep0.len = 8;
+      usbc_ep0.state = USB_STATE_SETUP;
     }
   else
     {
       dev->state = STALLED;
       usbc_ep0.state = USB_STATE_STALL;
+      notify_usbip ();
     }
 
   return r;
@@ -1350,11 +1371,16 @@ static void handle_out0 (struct usb_dev *dev)
     /* Usual case.  */
     handle_datastage_out (dev);
   else if (dev->state == WAIT_STATUS_OUT)
-    /*
-     * Control READ transfer finished by ZLP.
-     * Leave ENDP0 status RX_NAK, TX_NAK.
-     */
-    dev->state = WAIT_SETUP;
+    {
+      /*
+       * Control READ transfer finished by ZLP.
+       * Leave ENDP0 status RX_NAK, TX_NAK.
+       */
+      dev->state = WAIT_SETUP;
+      usbc_ep0.buf = usb_setup;
+      usbc_ep0.len = 8;
+      usbc_ep0.state = USB_STATE_SETUP;
+    }
   else
     {
       /*
@@ -1365,6 +1391,7 @@ static void handle_out0 (struct usb_dev *dev)
        */
       dev->state = STALLED;
       usbc_ep0.state = USB_STATE_STALL;
+      notify_usbip ();
     }
 }
 
@@ -1405,6 +1432,7 @@ int
 usb_lld_ctrl_ack (struct usb_dev *dev)
 {
   dev->state = WAIT_STATUS_IN;
+  usbc_ep0.buf = usb_setup;
   usbc_ep0.len = 0;
   usbc_ep0.state = USB_STATE_TX;
   notify_usbip ();
@@ -1418,7 +1446,11 @@ usb_lld_ctrl_recv (struct usb_dev *dev, void *p, size_t len)
   data_p->addr = p;
   data_p->len = len;
   dev->state = OUT_DATA;
+  if (len > USB_MAX_PACKET_SIZE)
+    len = USB_MAX_PACKET_SIZE;
   usbc_ep0.state = USB_STATE_RX;
+  usbc_ep0.buf = p;
+  usbc_ep0.len = len;
   notify_usbip ();
   return USB_EVENT_OK;
 }
@@ -1451,15 +1483,12 @@ usb_lld_ctrl_send (struct usb_dev *dev, const void *buf, size_t buflen)
       dev->state = IN_DATA;
     }
 
-  if (len)
-    {
-      memcpy (usbc_ep0.buf, data_p->addr, len);
-      data_p->len -= len;
-      data_p->addr += len;
-    }
-
+  usbc_ep0.buf = data_p->addr;
   usbc_ep0.len = len;
   usbc_ep0.state = USB_STATE_TX;
+
+  data_p->len -= len;
+  data_p->addr += len;
   notify_usbip ();
   return USB_EVENT_OK;
 }
@@ -1467,8 +1496,7 @@ usb_lld_ctrl_send (struct usb_dev *dev, const void *buf, size_t buflen)
 uint8_t
 usb_lld_current_configuration (struct usb_dev *dev)
 {
-  (void)dev;
-  return 0;
+  return dev->configuration;
 }
 
 
@@ -1476,7 +1504,7 @@ void
 usb_lld_ctrl_error (struct usb_dev *dev)
 {
   dev->state = STALLED;
-  usbc_ep0.state == USB_STATE_STALL;
+  usbc_ep0.state = USB_STATE_STALL;
   notify_usbip ();
 }
 
