@@ -84,6 +84,11 @@ static struct usbip_usb_device usbip_usb_device;
 
 static const char *issue_get_desc (void);
 
+#define MY_BUS_ID "1-1\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
+
+#define USBIP_DIR_OUT 0
+#define USBIP_DIR_IN  1
+
 static void
 refresh_usb_device (void)
 {
@@ -100,6 +105,9 @@ refresh_usb_device (void)
   usbip_usb_device.busnum = 0;
   usbip_usb_device.devnum = 0;
   usbip_usb_device.speed =  htonl (1);
+
+  /* USB descriptors are little endian.  USBIP is network order.  */
+
   /* 0: size=18 (or follows more desc) */
   /* 1: DEVICE_DESCRIPTOR */
   /* 2: bcdUSB: ignore or use for speed? */
@@ -115,9 +123,9 @@ refresh_usb_device (void)
   /* 16: iSerialNumber: ignore */
   /* 17: bNumConfigurations */
   /* ... */
-  usbip_usb_device.idVendor = htonh (((desc[8] << 8)|desc[9]));
-  usbip_usb_device.idProduct = htonh (((desc[10] << 8)|desc[11]));
-  usbip_usb_device.bcdDevice = htonh (((desc[12] << 8)|desc[13]));
+  usbip_usb_device.idVendor = htons (((desc[9] << 8)|desc[8]));
+  usbip_usb_device.idProduct = htons (((desc[11] << 8)|desc[10]));
+  usbip_usb_device.bcdDevice = htons (((desc[13] << 8)|desc[12]));
 
   usbip_usb_device.bDeviceClass = desc[4];
   usbip_usb_device.bDeviceSubClass = desc[5];
@@ -153,21 +161,20 @@ enum {
 struct usb_controller {
   uint8_t intr;
   uint8_t dir;
-  uint8_t ep;
+  uint8_t ep_num;
 };
 
 static struct usb_controller usbc;
 
 static void
-notify_device (uint8_t intr, uint8_t dir, uint8_t ep)
+notify_device (uint8_t intr, uint8_t dir, uint8_t ep_num)
 {
   usbc.intr = intr;
   usbc.dir = (dir == USBIP_DIR_IN);
-  usbc.ep = ep;
+  usbc.ep_num = ep_num;
   pthread_kill (tid_main, SIGUSR1);
 }
 
-#define MY_BUS_ID "1-1\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
 static const char *
 list_devices (size_t *len_p)
@@ -180,8 +187,6 @@ list_devices (size_t *len_p)
 static const char *
 attach_device (char busid[32], size_t *len_p)
 {
-  char *p0, *p;
-
   *len_p = 0;
   if (memcmp (busid, MY_BUS_ID, 32) != 0) 
     return NULL;
@@ -195,8 +200,6 @@ attach_device (char busid[32], size_t *len_p)
 
 #define URB_DATA_SIZE 65536
 
-#define USBIP_DIR_OUT 0
-#define USBIP_DIR_IN  1
 
 struct usbip_msg_ctl {
   uint32_t devid;
@@ -218,7 +221,7 @@ static int control_write_data_transaction (char *buf, uint16_t count);
 static int control_write_status_transaction (void);
 static int control_read_data_transaction (char *buf);
 static int control_read_status_transaction (void);
-static init write_data_transaction (int ep_num, char *buf, uint16_t count);
+static int write_data_transaction (int ep_num, char *buf, uint16_t count);
 static int read_data_transaction (int ep_num, char *buf);
 
 
@@ -289,7 +292,7 @@ handle_control_urb (uint8_t dir, uint16_t len)
 }
 
 static int
-handle_data_urb  (uint8_t ep, uint8_t dir, uint16_t len)
+handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
 {
   int r;
 
@@ -305,7 +308,7 @@ handle_data_urb  (uint8_t ep, uint8_t dir, uint16_t len)
 	  else
 	    count = remain;
 
-	  r = write_data_transaction (ep, usb_data_p, count);
+	  r = write_data_transaction (ep_num, usb_data_p, count);
 	  if (r < 0)
 	    break;
 
@@ -324,7 +327,7 @@ handle_data_urb  (uint8_t ep, uint8_t dir, uint16_t len)
       usb_data_p = usb_data;
       while (1)
 	{
-	  r = read_data_transaction (usb_data_p);
+	  r = read_data_transaction (ep_num, usb_data_p);
 	  if (r < 0)
 	    break;
 
@@ -356,14 +359,14 @@ handle_data_urb  (uint8_t ep, uint8_t dir, uint16_t len)
 static const char *
 issue_get_desc (void)
 {
-  usb_setp[0] = 0x80;		        /* Type: GET, Standard, DEVICE */
-  usb_setp[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
-  usb_setp[2] = 0;			/* Value H: device desc */
-  usb_setp[3] = 0;			/* Value L: 0 */
-  usb_setp[4] = 0;              	/* Index */
-  usb_setp[5] = 0;
-  usb_setp[6] = 0;		        /* Length */
-  usb_setp[7] = 63;
+  usb_setup[0] = 0x80;		        /* Type: GET, Standard, DEVICE */
+  usb_setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
+  usb_setup[2] = 0;			/* Value H: device desc */
+  usb_setup[3] = 0;			/* Value L: 0 */
+  usb_setup[4] = 0;              	/* Index */
+  usb_setup[5] = 0;
+  usb_setup[6] = 0;		        /* Length */
+  usb_setup[7] = 63;
   usb_data_p = usb_data;
   handle_control_urb (USBIP_DIR_IN, 63);
   return (const char *)usb_data;
@@ -385,6 +388,13 @@ handle_urb (int fd, uint32_t seq)
       goto leave;
     }
 
+  if (ntohl (msg_ctl.len) > URB_DATA_SIZE)
+    {
+      perror ("msg len too long");
+      r = -1;
+      goto leave;
+    }
+
   dir = ntohl (msg_ctl.dir);
   ep = ntohl (msg_ctl.ep);
   len = ntohl (msg_ctl.len);
@@ -401,13 +411,6 @@ handle_urb (int fd, uint32_t seq)
 
   if (dir == USBIP_DIR_OUT && len)
     {
-      if (len > URB_DATA_SIZE)
-	{
-	  perror ("msg len too long");
-	  r = -1;
-	  goto leave;
-	}
-
       if (recv (fd, usb_data, len, 0) != len)
 	{
 	  perror ("msg recv data");
@@ -453,14 +456,6 @@ handle_urb (int fd, uint32_t seq)
 
 
 static void
-notify_usbip (struct usb_control *epc)
-{
-  pthread_mutex_lock (&epc->mutex);
-  pthread_cond_signal (&epc->cond);
-  pthread_mutex_unlock (&epc->mutex);
-}
-
-static void
 send_reply (int fd, char *reply, int ok)
 {
   char buf[8];
@@ -494,9 +489,6 @@ run_server (void *arg)
   int sock;
   struct sockaddr_in v4addr;
   const int one = 1;
-
-  pthread_mutex_init (&comm_mutex, NULL);
-  pthread_cond_init (&comm_cond, NULL);
 
   (void)arg;
   if ((sock = socket (PF_INET, SOCK_STREAM, 0)) < 0)
@@ -913,7 +905,7 @@ write_data_transaction (int ep_num, char *buf, uint16_t count)
  *         \-{NAK}--------------> again
  */
 static int
-read_data_transaction (int ep_num, char *buf, uint16_t count)
+read_data_transaction (int ep_num, char *buf)
 {
   int r;
   uint16_t count;
@@ -1028,6 +1020,7 @@ usb_lld_shutdown (void)
 #define USB_MAKE_TXRX(ep_num,txrx,len) ((txrx? (1<<23):0)|(ep_num<<16)|len)
 
 static int handle_setup0 (struct usb_dev *dev);
+static int usb_handle_transfer (struct usb_dev *dev, uint8_t dir);
 
 int
 usb_lld_event_handler (struct usb_dev *dev)
@@ -1174,7 +1167,6 @@ static int std_get_status (struct usb_dev *dev)
   else if (rcp == ENDPOINT_RECIPIENT)
     {
       uint8_t ep_num = (arg->index & 0x0f);
-      uint16_t status;
 
       if ((arg->index & 0x70) || ep_num == ENDP0)
 	return -1;
@@ -1513,9 +1505,9 @@ static void handle_out0 (struct usb_dev *dev)
 
 
 static int
-usb_handle_transfer (struct usb_dev *dev, uint16_t dir)
+usb_handle_transfer (struct usb_dev *dev, uint8_t dir)
 {
-  if (usbc.ep == 0)
+  if (usbc.ep_num == 0)
     {
       if (dir)
 	return USB_MAKE_EV (handle_in0 (dev));
@@ -1531,13 +1523,13 @@ usb_handle_transfer (struct usb_dev *dev, uint16_t dir)
 
       if (dir)
 	{
-	  len = usbc_ep_in[ep_num].len;
-	  return USB_MAKE_TXRX (ep_num, 0, len);
+	  len = usbc_ep_in[usbc.ep_num].len;
+	  return USB_MAKE_TXRX (usbc.ep_num, 0, len);
 	}
       else
 	{
-	  len = usbc_ep_out[ep_num].len;
-	  return  USB_MAKE_TXRX (ep_num, 1, len);
+	  len = usbc_ep_out[usbc.ep_num].len;
+	  return  USB_MAKE_TXRX (usbc.ep_num, 1, len);
 	}
     }
 
@@ -1649,6 +1641,8 @@ usb_lld_set_configuration (struct usb_dev *dev, uint8_t config)
 void
 usb_lld_setup_endp (struct usb_dev *dev, int ep_num, int rx_en, int tx_en)
 {
+  (void)dev;
+
   if (ep_num == 0)
     return;
 
@@ -1657,6 +1651,8 @@ usb_lld_setup_endp (struct usb_dev *dev, int ep_num, int rx_en, int tx_en)
       usbc_ep_out[ep_num].buf = NULL;
       usbc_ep_out[ep_num].len = 0;
       usbc_ep_out[ep_num].state = USB_STATE_NAK;
+      pthread_mutex_init (&usbc_ep_out[ep_num].mutex, NULL);
+      pthread_cond_init (&usbc_ep_out[ep_num].cond, NULL);
     }
 
   if (tx_en)
@@ -1664,6 +1660,8 @@ usb_lld_setup_endp (struct usb_dev *dev, int ep_num, int rx_en, int tx_en)
       usbc_ep_in[ep_num].buf = NULL;
       usbc_ep_in[ep_num].len = 0;
       usbc_ep_in[ep_num].state = USB_STATE_NAK;
+      pthread_mutex_init (&usbc_ep_in[ep_num].mutex, NULL);
+      pthread_cond_init (&usbc_ep_in[ep_num].cond, NULL);
     }
 }
 
@@ -1678,4 +1676,31 @@ void
 usb_lld_stall_rx (int ep_num)
 {
   usbc_ep_out[ep_num].state = USB_STATE_STALL;
+}
+
+void
+usb_lld_rx_enable_buf (int ep_num, void *buf, size_t len)
+{
+  struct usb_control *usbc_p = &usbc_ep_out[ep_num];
+
+  pthread_mutex_lock (&usbc_p->mutex);
+  usbc_p->state = USB_STATE_RX;
+  usbc_p->buf = buf;
+  usbc_p->len = len;
+  pthread_cond_signal (&usbc_p->cond);
+  pthread_mutex_unlock (&usbc_p->mutex);
+}
+
+
+void
+usb_lld_tx_enable_buf (int ep_num, const void *buf, size_t len)
+{
+  struct usb_control *usbc_p = &usbc_ep_out[ep_num];
+
+  pthread_mutex_lock (&usbc_p->mutex);
+  usbc_p->state = USB_STATE_TX;
+  usbc_p->buf = (void *)buf;
+  usbc_p->len = len;
+  pthread_cond_signal (&usbc_p->cond);
+  pthread_mutex_unlock (&usbc_p->mutex);
 }
