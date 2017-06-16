@@ -395,6 +395,8 @@ issue_get_desc (void)
   return (const char *)usb_data;
 }
 
+static pthread_mutex_t fd_mutex;
+
 static void
 handle_urb (int fd, uint32_t seq)
 {
@@ -480,6 +482,7 @@ handle_urb (int fd, uint32_t seq)
   else
     msg_ctl.flags_status = 0;
 
+  pthread_mutex_lock (&fd_mutex);
   if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
     {
       perror ("reply send");
@@ -502,6 +505,7 @@ handle_urb (int fd, uint32_t seq)
 	  perror ("reply send");
 	}
     }
+  pthread_mutex_unlock (&fd_mutex);
 }
 
 
@@ -542,6 +546,8 @@ run_server (void *arg)
 
   pthread_mutex_init (&usbc.mutex, NULL);
   pthread_cond_init (&usbc.cond, NULL);
+
+  pthread_mutex_init (&fd_mutex, NULL);
 
   (void)arg;
   if ((sock = socket (PF_INET, SOCK_STREAM, 0)) < 0)
@@ -612,17 +618,15 @@ run_server (void *arg)
 
 	      device_list = list_devices (&device_list_size);
 
+	      pthread_mutex_lock (&fd_mutex);
 	      send_reply (fd, USBIP_REPLY_DEVICE_LIST, !!device_list);
 
-	      if (send (fd, NETWORK_UINT32_ONE, 4, 0) != 4)
+	      if (send (fd, NETWORK_UINT32_ONE, 4, 0) == 4
+		  && (size_t)send (fd, device_list, device_list_size, 0) == device_list_size)
+		pthread_mutex_unlock (&fd_mutex);
+	      else
 		{
-		  perror ("list send");
-		  break;
-		}
-
-	      if ((size_t)send (fd, device_list, device_list_size, 0)
-		  != device_list_size)
-		{
+		  pthread_mutex_unlock (&fd_mutex);
 		  perror ("list send");
 		  break;
 		}
@@ -646,39 +650,42 @@ run_server (void *arg)
 		}
 
 	      attach = attach_device (busid, &attach_size);
+
+	      pthread_mutex_lock (&fd_mutex);
 	      send_reply (fd, USBIP_REPLY_ATTACH, !!attach);
-	      if (attach)
+	      if (attach
+		  && (size_t)send (fd, attach, attach_size, 0) == attach_size)
 		{
-		  if ((size_t)send (fd, attach, attach_size, 0) != attach_size)
-		    {
-		      perror ("list send");
-		      break;
-		    }
 		  printf ("Attach device!\n");
 		  attached = 1;
+		  pthread_mutex_unlock (&fd_mutex);
+		}
+	      else
+		{
+		  pthread_mutex_unlock (&fd_mutex);
+		  perror ("list send");
+		  break;
 		}
 	    }
 	  else if (msg.cmd == CMD_URB_SUBMIT)
 	    {
 	      if (!attached)
 		{
-		  fprintf (stderr, "URB while attached\n");
+		  fprintf (stderr, "SUBMIT while attached\n");
 		  break;
 		}
 
-	      printf ("URB!\n");
+	      printf ("SUBMIT!\n");
 	      handle_urb (fd, msg.seq);
 	    }
 	  else if (msg.cmd == CMD_URB_UNLINK)
 	    {
 	      if (!attached)
 		{
-		  fprintf (stderr, "DETACH while attached\n");
+		  fprintf (stderr, "UNLINK while attached\n");
 		  break;
 		}
 
-	      printf ("detach!\n");
-	      /* send reply??? */
 	      break;
 	    }
 	  else
