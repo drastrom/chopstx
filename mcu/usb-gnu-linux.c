@@ -49,7 +49,7 @@ static pthread_t tid_usbip;
 #define CMD_URB        0x00000001
 #define CMD_DETACH     0x00000002
 
-#define RET_URB        0x00000003
+#define REPLY_URB      0x00000003
 
 struct usbip_msg_head {
   uint32_t cmd;
@@ -104,7 +104,7 @@ refresh_usb_device (void)
 
   usbip_usb_device.busnum = 0;
   usbip_usb_device.devnum = 0;
-  usbip_usb_device.speed =  htonl (1);
+  usbip_usb_device.speed =  htonl (2); /* Full speed.  */
 
   /* USB descriptors are little endian.  USBIP is network order.  */
 
@@ -394,6 +394,7 @@ handle_urb (int fd, uint32_t seq)
   uint8_t dir;
   uint16_t len;
   struct usbip_msg_head msg;
+  const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
   if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
     {
@@ -413,12 +414,18 @@ handle_urb (int fd, uint32_t seq)
   ep = ntohl (msg_ctl.ep);
   len = ntohl (msg_ctl.len);
 
+  printf ("URB: dir=%d, ep=%d, len=%d\n", dir, ep, len);
+
   if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
     {
       perror ("msg recv setup");
       r = -1;
       goto leave;
     }
+
+  printf ("URB: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	  usb_setup[0], usb_setup[1], usb_setup[2], usb_setup[3],
+	  usb_setup[4], usb_setup[5], usb_setup[6], usb_setup[7]);
 
   usb_data_p = usb_data;
 
@@ -447,10 +454,17 @@ handle_urb (int fd, uint32_t seq)
 
       msg_ctl.len = htonl (len);
     }
-  msg.cmd = htonl (RET_URB);
+  else
+    msg_ctl.len = 0;
+
+  msg.cmd = htonl (REPLY_URB);
   msg.seq = htonl (seq);
 
+  msg_ctl.ep = 0;
+  msg_ctl.dir = 0;
+  msg_ctl.rsvd[0] = msg_ctl.rsvd[1] = 0;
   msg_ctl.err_cnt = 0;
+
   if (r < 0)
     msg_ctl.flags_status = htonl (1);
   else
@@ -462,6 +476,11 @@ handle_urb (int fd, uint32_t seq)
     }
 
   if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+    {
+      perror ("reply send");
+    }
+
+  if ((size_t)send (fd, zeros, sizeof (zeros), 0) != sizeof (zeros))
     {
       perror ("reply send");
     }
@@ -571,6 +590,7 @@ run_server (void *arg)
 	      const char *device_list;
 	      size_t device_list_size;
 
+	      printf ("Device List\n");
 	      if (attached)
 		{
 		  fprintf (stderr, "REQ list while attached\n");
@@ -599,6 +619,7 @@ run_server (void *arg)
 	      const char *attach;
 	      size_t attach_size;
 
+	      printf ("Attach device\n");
 	      if (attached)
 		{
 		  fprintf (stderr, "REQ attach while attached\n");
@@ -620,6 +641,7 @@ run_server (void *arg)
 		      perror ("list send");
 		      break;
 		    }
+		  printf ("Attach device!\n");
 		  attached = 1;
 		}
 	    }
@@ -631,6 +653,7 @@ run_server (void *arg)
 		  break;
 		}
 
+	      printf ("URB!\n");
 	      /* Possibly spawn a thread for each URB.  */
 	      handle_urb (fd, msg.seq);
 	    }
@@ -642,6 +665,7 @@ run_server (void *arg)
 		  break;
 		}
 
+	      printf ("detach!\n");
 	      /* send reply??? */
 	      break;
 	    }
