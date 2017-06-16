@@ -152,6 +152,7 @@ refresh_usb_device (void)
 #define NETWORK_UINT16_ONE_ONE   "\x01\x01"
 
 enum {
+  USB_INTR_NONE = 0,
   USB_INTR_SETUP,
   USB_INTR_DATA_TRANSFER,
   USB_INTR_RESET,
@@ -167,7 +168,7 @@ struct usb_controller {
 static struct usb_controller usbc;
 
 static void
-notify_device (uint8_t intr, uint8_t dir, uint8_t ep_num)
+notify_device (uint8_t intr, uint8_t ep_num, uint8_t dir)
 {
   usbc.intr = intr;
   usbc.dir = (dir == USBIP_DIR_IN);
@@ -224,6 +225,24 @@ static int control_read_status_transaction (void);
 static int write_data_transaction (int ep_num, char *buf, uint16_t count);
 static int read_data_transaction (int ep_num, char *buf);
 
+enum {
+  USB_STATE_DISABLED = 0,
+  USB_STATE_STALL,
+  USB_STATE_NAK,
+  USB_STATE_SETUP,
+  USB_STATE_TX,
+  USB_STATE_RX,
+};
+
+struct usb_control {
+  uint8_t state;
+  uint8_t *buf;
+  uint16_t len;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+};
+
+static struct usb_control usbc_ep0;
 
 static int
 handle_control_urb (uint8_t dir, uint16_t len)
@@ -287,6 +306,7 @@ handle_control_urb (uint8_t dir, uint16_t len)
 	}
     }
 
+  usbc_ep0.state = USB_STATE_SETUP;
   return r;
 }
 
@@ -355,8 +375,8 @@ issue_get_desc (void)
 {
   usb_setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
   usb_setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
-  usb_setup[2] = 0;			 /* Value L: device desc */
-  usb_setup[3] = 0;			 /* Value H: 0 */
+  usb_setup[2] = 0;			 /* Value L: desc_index */
+  usb_setup[3] = 1;			 /* Value H: desc_type */
   usb_setup[4] = 0;              	 /* Index */
   usb_setup[5] = 0;
   usb_setup[6] = 63;		         /* Length */
@@ -638,27 +658,6 @@ run_server (void *arg)
   return NULL;
 }
 
-enum {
-  USB_STATE_DISABLED = 0,
-  USB_STATE_STALL,
-  USB_STATE_NAK,
-  USB_STATE_SETUP,
-  USB_STATE_TX,
-  USB_STATE_RX,
-};
-
-#define EP_TX_VALID (1<<0)
-#define EP_RX_VALID (1<<1)
-
-struct usb_control {
-  uint8_t state;
-  uint8_t *buf;
-  uint16_t len;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
-};
-
-static struct usb_control usbc_ep0;
 static struct usb_control usbc_ep_in[7];
 static struct usb_control usbc_ep_out[7];
 
@@ -1390,9 +1389,9 @@ handle_setup0 (struct usb_dev *dev)
 
   dev->dev_req.type = usb_setup[0];
   dev->dev_req.request = req_no = usb_setup[1];
-  dev->dev_req.value = (usb_setup[2] << 8) + usb_setup[3];
-  dev->dev_req.index = (usb_setup[4] << 8) + usb_setup[5];
-  dev->dev_req.len = (usb_setup[6] << 8) + usb_setup[7];
+  dev->dev_req.value = (usb_setup[3] << 8) + usb_setup[2];
+  dev->dev_req.index = (usb_setup[5] << 8) + usb_setup[4];
+  dev->dev_req.len = (usb_setup[7] << 8) + usb_setup[6];
 
   dev->ctrl_data.addr = NULL;
   dev->ctrl_data.len = 0;
