@@ -141,7 +141,7 @@ refresh_usb_device (void)
 #define INTERFACE_INFO_SIZE     4
 #define DEVICE_LIST_SIZE        (DEVICE_INFO_SIZE*1)
 
-#define USBIP_REPLY_DEVICE_LIST "\x01\x11\x00\x02"
+#define USBIP_REPLY_DEVICE_LIST "\x01\x11\x00\x05"
 #define USBIP_REPLY_ATTACH      "\x01\x11\x00\x03"
 
 #define NETWORK_UINT32_ZERO     "\x00\x00\x00\x00"
