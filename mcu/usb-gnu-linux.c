@@ -333,7 +333,7 @@ handle_control_urb (struct urb *urb)
       puts ("hcu 6");
     }
 
-  usbc_ep0.state = USB_STATE_SETUP;
+  // usbc_ep0.state = USB_STATE_SETUP;
   return r;
 }
 
@@ -342,11 +342,13 @@ handle_data_urb  (struct urb *urb)
 {
   int r;
 
+  puts ("hdu 0");
   if (urb->dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
       uint16_t remain = urb->len;
       uint16_t count;
 
+      puts ("hdu 1");
       while (1)
 	{
 	  if (remain > 64)
@@ -354,10 +356,12 @@ handle_data_urb  (struct urb *urb)
 	  else
 	    count = remain;
 
+	  puts ("hdu 2");
 	  r = write_data_transaction (urb->ep, urb->data_p, count);
 	  if (r < 0)
 	    break;
 
+	  puts ("hdu 3");
 	  urb->data_p += count;
 	  if (count < 64)
 	    {
@@ -370,12 +374,15 @@ handle_data_urb  (struct urb *urb)
     {				/* Input from device to host.  */
       int count = 0;
 
+      puts ("hdu 4");
       while (1)
 	{
+	  puts ("hdu 5");
 	  r = read_data_transaction (urb->ep, urb->data_p);
 	  if (r < 0)
 	    break;
 
+	  puts ("hdu 6");
 	  count += r;
 	  urb->data_p += r;
 	  if (r < 64)
@@ -575,13 +582,13 @@ handle_urb_next (void *arg)
   struct usbip_msg_ctl msg_ctl;
   const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
-  puts ("call hcu");
+  puts ("call h_u");
   if (urb->ep == 0)
     r = handle_control_urb (urb);
   else
     r = handle_data_urb (urb);
 
-  printf ("hcu: %d\n", r);
+  printf ("hu-next: %d (%d)\n", r, urb->seq);
   if (urb->dir == USBIP_DIR_IN)
     {
       if (r >= 0)
@@ -805,7 +812,7 @@ run_server (void *arg)
 	      break;
 	    }
 
-	  printf ("URB SUBMIT!\n");
+	  printf ("URB SUBMIT! %d\n", msg.seq);
 	  handle_urb (msg.seq);
 	}
       else if (msg.cmd == CMD_URB_UNLINK)
@@ -1012,7 +1019,7 @@ control_write_status_transaction (void)
 	puts ("control_write_status_transaction");
 	if (usbc_ep0.len != 0)
 	  fprintf (stderr, "*** ACK length %d\n", usbc_ep0.len);
-	usbc_ep0.state = USB_STATE_SETUP;
+	usbc_ep0.state = USB_STATE_NAK;
 	notify_device (USB_INTR_DATA_TRANSFER, 0, USBIP_DIR_IN);
 	r = 0;
 	break;
@@ -1088,7 +1095,7 @@ control_read_status_transaction (void)
     else if (usbc_ep0.state == USB_STATE_RX)
       {
 	usbc_ep0.len = 0;
-	usbc_ep0.state = USB_STATE_SETUP;
+	usbc_ep0.state = USB_STATE_NAK;
 	notify_device (USB_INTR_DATA_TRANSFER, 0, USBIP_DIR_OUT);
 	r = 0;
 	break;
@@ -1933,12 +1940,14 @@ usb_lld_setup_endp (struct usb_dev *dev, int ep_num, int rx_en, int tx_en)
 void
 usb_lld_stall_tx (int ep_num)
 {
+  printf ("stall tx %d", ep_num);
   usbc_ep_in[ep_num].state = USB_STATE_STALL;
 }
 
 void
 usb_lld_stall_rx (int ep_num)
 {
+  printf ("stall rx %d", ep_num);
   usbc_ep_out[ep_num].state = USB_STATE_STALL;
 }
 
@@ -1959,7 +1968,7 @@ usb_lld_rx_enable_buf (int ep_num, void *buf, size_t len)
 void
 usb_lld_tx_enable_buf (int ep_num, const void *buf, size_t len)
 {
-  struct usb_control *usbc_p = &usbc_ep_out[ep_num];
+  struct usb_control *usbc_p = &usbc_ep_in[ep_num];
 
   pthread_mutex_lock (&usbc_p->mutex);
   usbc_p->state = USB_STATE_TX;
