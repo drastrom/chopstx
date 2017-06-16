@@ -423,9 +423,10 @@ handle_urb (int fd, uint32_t seq)
       goto leave;
     }
 
-  printf ("URB: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	  usb_setup[0], usb_setup[1], usb_setup[2], usb_setup[3],
-	  usb_setup[4], usb_setup[5], usb_setup[6], usb_setup[7]);
+  if (ep == 0)
+    printf ("URB: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	    usb_setup[0], usb_setup[1], usb_setup[2], usb_setup[3],
+	    usb_setup[4], usb_setup[5], usb_setup[6], usb_setup[7]);
 
   usb_data_p = usb_data;
 
@@ -873,6 +874,8 @@ control_read_status_transaction (void)
   return r;
 }
 
+#define USB_URB_TIMEOUT 1000000 /* nanosecond */
+
 /* WRITE transaction
  * -->[OUT]--->[DATAx]--->{ACK}---> Success
  *                     \--{NAK}---> again
@@ -888,7 +891,22 @@ write_data_transaction (int ep_num, char *buf, uint16_t count)
   pthread_mutex_lock (&usbc_p->mutex);
   while (1)
     if (usbc_p->state == USB_STATE_NAK)
-      pthread_cond_wait (&usbc_p->cond, &usbc_p->mutex); /* Timed wait??? */
+      {
+	struct timespec ts;
+	clock_gettime (CLOCK_REALTIME, &ts);
+	ts.tv_nsec += USB_URB_TIMEOUT;
+	if (ts.tv_nsec >= 1000000000L)
+	  {
+	    ts.tv_nsec -= 1000000000L;
+	    ts.tv_sec++;
+	  }
+	r = pthread_cond_timedwait (&usbc_p->cond, &usbc_p->mutex, &ts);
+	if (r)
+	  {
+	    r = -1;
+	    break;
+	  }
+      }
     else if (usbc_p->state == USB_STATE_RX)
       {
 	if (usbc_p->len < count)
@@ -932,7 +950,22 @@ read_data_transaction (int ep_num, char *buf)
   pthread_mutex_lock (&usbc_p->mutex);
   while (1)
     if (usbc_p->state == USB_STATE_NAK)
-      pthread_cond_wait (&usbc_p->cond, &usbc_p->mutex);
+      {
+	struct timespec ts;
+	clock_gettime (CLOCK_REALTIME, &ts);
+	ts.tv_nsec += USB_URB_TIMEOUT;
+	if (ts.tv_nsec >= 1000000000L)
+	  {
+	    ts.tv_nsec -= 1000000000L;
+	    ts.tv_sec++;
+	  }
+	r = pthread_cond_timedwait (&usbc_p->cond, &usbc_p->mutex, &ts);
+	if (r)
+	  {
+	    r = -1;
+	    break;
+	  }
+      }
     else if (usbc_p->state == USB_STATE_TX)
       {
 	if (usbc_p->len > 64)
