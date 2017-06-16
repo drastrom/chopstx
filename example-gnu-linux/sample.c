@@ -101,18 +101,8 @@ static char __process2_stack_base__[4096];
 #define STACK_SIZE_BLK (sizeof __process2_stack_base__)
 
 
-void entry (void);
-
 int
-main (int argc, const char *argv[])
-{
-  (void)argc;
-  (void)argv;
-  entry ();
-}
-
-int
-emu_main (int argc, const char *argv[])
+emulated_main (int argc, const char *argv[])
 {
   (void)argc;
   (void)argv;

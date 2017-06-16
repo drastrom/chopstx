@@ -6,9 +6,24 @@
 #include "usb_lld.h"
 #include "tty.h"
 
-/* For set_led */
-#include "board.h"
-#include "sys.h"
+#include <unistd.h>
+#include <stdio.h>
+
+static void
+set_led (int on)
+{
+#if 1
+  if (on)
+    write (1, "********\x08\x08\x08\x08\x08\x08\x08\x08", 16);
+  else
+    write (1, "        \x08\x08\x08\x08\x08\x08\x08\x08", 16);
+#else
+  if (on)
+    puts ("!");
+  else
+    puts ("");
+#endif
+}
 
 static chopstx_mutex_t mtx;
 static chopstx_cond_t cnd0;
@@ -82,6 +97,10 @@ static char hexchar (uint8_t x)
     return '?';
 }
 
+
+#ifdef GNU_LINUX_EMULATION
+#define main emulated_main
+#endif
 
 int
 main (int argc, const char *argv[])

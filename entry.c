@@ -34,12 +34,12 @@
 #include "board.h"
 
 #ifdef GNU_LINUX_EMULATION
-int emu_main (int, const char **);
+int emulated_main (int, const char **);
 void chx_init (void);
 void chx_systick_init (void);
 
-void
-entry (void)
+int
+main (int argc, const char *argv[])
 {
 #if 0
   clock_init ();
@@ -49,7 +49,7 @@ entry (void)
 #if 0
   gpio_init();
 #endif
-  emu_main (0, NULL);
+  emulated_main (argc, argv);
 }
 #else
 #if defined(USE_SYS3) || defined(USE_SYS_CLOCK_GPIO_SETTING)
