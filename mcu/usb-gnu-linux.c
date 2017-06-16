@@ -1879,6 +1879,7 @@ usb_lld_current_configuration (struct usb_dev *dev)
 void
 usb_lld_ctrl_error (struct usb_dev *dev)
 {
+  puts ("ctrl_error");
   dev->state = STALLED;
   pthread_mutex_lock (&usbc_ep0.mutex);
   usbc_ep0.state = USB_STATE_STALL;
