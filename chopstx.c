@@ -752,7 +752,7 @@ chx_wakeup (struct chx_pq *pq)
 	  if (tp->parent == &q_timer.q)
 	    chx_timer_dequeue (tp);
 	  chx_ready_enqueue (tp);
-	  if (tp->prio > running->prio)
+	  if (!running || tp->prio > running->prio)
 	    yield = 1;
 	}
       chx_spin_unlock (&px->lock);
@@ -762,7 +762,7 @@ chx_wakeup (struct chx_pq *pq)
       tp = (struct chx_thread *)pq;
       tp->v = (uintptr_t)1;
       chx_ready_enqueue (tp);
-      if (tp->prio > running->prio)
+      if (!running || tp->prio > running->prio)
 	yield = 1;
     }
 
