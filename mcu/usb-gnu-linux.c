@@ -47,10 +47,11 @@ static pthread_t tid_usbip;
 
 #define CMD_REQ_LIST   0x01118005
 #define CMD_REQ_ATTACH 0x01118003
-#define CMD_URB        0x00000001
-#define CMD_DETACH     0x00000002
+#define CMD_URB_SUBMIT 0x00000001
+#define CMD_URB_UNLINK 0x00000002
 
-#define REPLY_URB      0x00000003
+#define REP_URB_SUBMIT 0x00000003
+#define REP_URB_UNLINK 0x00000004
 
 struct usbip_msg_head {
   uint32_t cmd;
@@ -161,6 +162,8 @@ enum {
 };
 
 struct usb_controller {
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
   uint8_t intr;
   uint8_t dir;
   uint8_t ep_num;
@@ -171,10 +174,14 @@ static struct usb_controller usbc;
 static void
 notify_device (uint8_t intr, uint8_t ep_num, uint8_t dir)
 {
+  pthread_mutex_lock (&usbc.mutex);
+  if (usbc.intr)
+    pthread_cond_wait (&usbc.cond, &usbc.mutex);
   usbc.intr = intr;
   usbc.dir = (dir == USBIP_DIR_IN);
   usbc.ep_num = ep_num;
   pthread_kill (tid_main, SIGUSR1);
+  pthread_mutex_unlock (&usbc.mutex);
 }
 
 
@@ -460,7 +467,7 @@ handle_urb (int fd, uint32_t seq)
   else
     msg_ctl.len = 0;
 
-  msg.cmd = htonl (REPLY_URB);
+  msg.cmd = htonl (REP_URB_SUBMIT);
   msg.seq = htonl (seq);
 
   msg_ctl.ep = 0;
@@ -532,6 +539,9 @@ run_server (void *arg)
   int sock;
   struct sockaddr_in v4addr;
   const int one = 1;
+
+  pthread_mutex_init (&usbc.mutex, NULL);
+  pthread_cond_init (&usbc.cond, NULL);
 
   (void)arg;
   if ((sock = socket (PF_INET, SOCK_STREAM, 0)) < 0)
@@ -648,7 +658,7 @@ run_server (void *arg)
 		  attached = 1;
 		}
 	    }
-	  else if (msg.cmd == CMD_URB)
+	  else if (msg.cmd == CMD_URB_SUBMIT)
 	    {
 	      if (!attached)
 		{
@@ -657,10 +667,9 @@ run_server (void *arg)
 		}
 
 	      printf ("URB!\n");
-	      /* Possibly spawn a thread for each URB.  But then, we need to serialize INTR.  */
 	      handle_urb (fd, msg.seq);
 	    }
-	  else if (msg.cmd == CMD_DETACH)
+	  else if (msg.cmd == CMD_URB_UNLINK)
 	    {
 	      if (!attached)
 		{
@@ -1076,17 +1085,29 @@ usb_lld_shutdown (void)
 #define USB_MAKE_TXRX(ep_num,txrx,len) ((txrx? (1<<23):0)|(ep_num<<16)|len)
 
 static int handle_setup0 (struct usb_dev *dev);
-static int usb_handle_transfer (struct usb_dev *dev, uint8_t dir);
+static int usb_handle_transfer (struct usb_dev *dev, uint8_t dir, uint8_t ep_num);
 
 int
 usb_lld_event_handler (struct usb_dev *dev)
 {
-  if (usbc.intr == USB_INTR_RESET)
+  uint8_t intr;
+  uint8_t dir;
+  uint8_t ep_num;
+
+  pthread_mutex_lock (&usbc.mutex);
+  intr = usbc.intr;
+  dir = usbc.dir;
+  ep_num = usbc.ep_num;
+  usbc.intr = USB_INTR_NONE;
+  pthread_cond_signal (&usbc.cond);
+  pthread_mutex_unlock (&usbc.mutex);
+
+  if (intr == USB_INTR_RESET)
     return USB_MAKE_EV (USB_EVENT_DEVICE_RESET);
-  else if (usbc.intr == USB_INTR_SETUP)
+  else if (intr == USB_INTR_SETUP)
     return USB_MAKE_EV (handle_setup0 (dev));
-  else if (usbc.intr == USB_INTR_DATA_TRANSFER)
-    return usb_handle_transfer (dev, usbc.dir);
+  else if (intr == USB_INTR_DATA_TRANSFER)
+    return usb_handle_transfer (dev, dir, ep_num);
 
   return USB_EVENT_OK;
 }
@@ -1561,9 +1582,9 @@ static void handle_out0 (struct usb_dev *dev)
 
 
 static int
-usb_handle_transfer (struct usb_dev *dev, uint8_t dir)
+usb_handle_transfer (struct usb_dev *dev, uint8_t dir, uint8_t ep_num)
 {
-  if (usbc.ep_num == 0)
+  if (ep_num == 0)
     {
       if (dir)
 	return USB_MAKE_EV (handle_in0 (dev));
@@ -1579,13 +1600,13 @@ usb_handle_transfer (struct usb_dev *dev, uint8_t dir)
 
       if (dir)
 	{
-	  len = usbc_ep_in[usbc.ep_num].len;
-	  return USB_MAKE_TXRX (usbc.ep_num, 0, len);
+	  len = usbc_ep_in[ep_num].len;
+	  return USB_MAKE_TXRX (ep_num, 0, len);
 	}
       else
 	{
-	  len = usbc_ep_out[usbc.ep_num].len;
-	  return  USB_MAKE_TXRX (usbc.ep_num, 1, len);
+	  len = usbc_ep_out[ep_num].len;
+	  return  USB_MAKE_TXRX (ep_num, 1, len);
 	}
     }
 
