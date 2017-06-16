@@ -200,7 +200,7 @@ attach_device (char busid[32], size_t *len_p)
   if (memcmp (busid, MY_BUS_ID, 32) != 0) 
     return NULL;
 
-  notify_device (USB_INTR_RESET, 0, 0);
+  //  notify_device (USB_INTR_RESET, 0, 0);
 
   refresh_usb_device ();
   *len_p = sizeof (usbip_usb_device);
@@ -209,23 +209,36 @@ attach_device (char busid[32], size_t *len_p)
 
 #define URB_DATA_SIZE 65536
 
-
 struct usbip_msg_ctl {
   uint32_t devid;
   uint32_t dir;
   uint32_t ep;
-  uint32_t flags_status;
+  uint32_t status;
   uint32_t len;
   uint32_t rsvd[2];
   uint32_t err_cnt;
 };
 
-static struct usbip_msg_ctl msg_ctl;
-static uint8_t usb_setup[8];
-static char usb_data[URB_DATA_SIZE];
-static char *usb_data_p;
+struct urb {
+  struct urb *next;
+  struct urb *prev;
+  pthread_t tid;
+  uint32_t seq;
+  uint32_t devid;
+  uint32_t dir;
+  uint32_t ep;
+  uint32_t len;
+  uint8_t setup[8];
+  char data[URB_DATA_SIZE];
+  char *data_p;
+};
 
-static int control_setup_transaction (uint8_t dir);
+static pthread_mutex_t urb_mutex;
+static struct urb *urb_list;
+
+static uint8_t usb_setup[8];
+
+static int control_setup_transaction (struct urb *urb);
 static int control_write_data_transaction (char *buf, uint16_t count);
 static int control_write_status_transaction (void);
 static int control_read_data_transaction (char *buf);
@@ -253,17 +266,19 @@ struct usb_control {
 static struct usb_control usbc_ep0;
 
 static int
-handle_control_urb (uint8_t dir, uint16_t len)
+handle_control_urb (struct urb *urb)
 {
   int r;
 
-  r = control_setup_transaction (dir);
+  puts ("hcu 0");
+  r = control_setup_transaction (urb);
   if (r < 0)
     return r;
 
-  if (dir == USBIP_DIR_OUT)
+  puts ("hcu 1");
+  if (urb->dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
-      uint16_t remain = len;
+      uint16_t remain = urb->len;
       uint16_t count;
 
       printf ("hcu: %d\n", r);
@@ -274,11 +289,11 @@ handle_control_urb (uint8_t dir, uint16_t len)
 	  else
 	    count = remain;
 
-	  r = control_write_data_transaction (usb_data_p, count);
+	  r = control_write_data_transaction (urb->data_p, count);
 	  if (r < 0)
 	    break;
 
-	  usb_data_p += count;
+	  urb->data_p += count;
 	  if (count < 64)
 	    break;
 	}
@@ -288,16 +303,16 @@ handle_control_urb (uint8_t dir, uint16_t len)
   else
     {				/* Input from device to host.  */
       int count = 0;
-
-      usb_data_p = usb_data;
+      puts ("hcu 2");
       while (1)
 	{
-	  r = control_read_data_transaction (usb_data_p);
+	  r = control_read_data_transaction (urb->data_p);
 	  if (r < 0)
 	    break;
 
+	  puts ("hcu 3");
 	  count += r;
-	  usb_data_p += r;
+	  urb->data_p += r;
 	  if (r < 64)
 	    break;
 
@@ -307,12 +322,15 @@ handle_control_urb (uint8_t dir, uint16_t len)
 	      return -1;
 	    }
 	}
+      puts ("hcu 4");
       if (r >= 0)
 	{
+	  puts ("hcu 5");
 	  r = control_read_status_transaction ();
 	  if (r >= 0)
 	    r = count;
 	}
+      puts ("hcu 6");
     }
 
   usbc_ep0.state = USB_STATE_SETUP;
@@ -320,13 +338,13 @@ handle_control_urb (uint8_t dir, uint16_t len)
 }
 
 static int
-handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
+handle_data_urb  (struct urb *urb)
 {
   int r;
 
-  if (dir == USBIP_DIR_OUT)
+  if (urb->dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
-      uint16_t remain = len;
+      uint16_t remain = urb->len;
       uint16_t count;
 
       while (1)
@@ -336,11 +354,11 @@ handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
 	  else
 	    count = remain;
 
-	  r = write_data_transaction (ep_num, usb_data_p, count);
+	  r = write_data_transaction (urb->ep, urb->data_p, count);
 	  if (r < 0)
 	    break;
 
-	  usb_data_p += count;
+	  urb->data_p += count;
 	  if (count < 64)
 	    {
 	      r = 0;
@@ -352,15 +370,14 @@ handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
     {				/* Input from device to host.  */
       int count = 0;
 
-      usb_data_p = usb_data;
       while (1)
 	{
-	  r = read_data_transaction (ep_num, usb_data_p);
+	  r = read_data_transaction (urb->ep, urb->data_p);
 	  if (r < 0)
 	    break;
 
 	  count += r;
-	  usb_data_p += r;
+	  urb->data_p += r;
 	  if (r < 64)
 	    break;
 
@@ -379,108 +396,216 @@ handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
 
 #define USB_REQ_GET_DESCRIPTOR		0x06
 
+static struct urb urb_getdesc;
+
 static const char *
 issue_get_desc (void)
 {
-  usb_setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
-  usb_setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
-  usb_setup[2] = 0;			 /* Value L: desc_index */
-  usb_setup[3] = 1;			 /* Value H: desc_type */
-  usb_setup[4] = 0;              	 /* Index */
-  usb_setup[5] = 0;
-  usb_setup[6] = 63;		         /* Length */
-  usb_setup[7] = 0;
-  usb_data_p = usb_data;
-  handle_control_urb (USBIP_DIR_IN, 63);
-  return (const char *)usb_data;
+  urb_getdesc.setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
+  urb_getdesc.setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
+  urb_getdesc.setup[2] = 0;			 /* Value L: desc_index */
+  urb_getdesc.setup[3] = 1;			 /* Value H: desc_type */
+  urb_getdesc.setup[4] = 0;              	 /* Index */
+  urb_getdesc.setup[5] = 0;
+  urb_getdesc.setup[6] = 64;		         /* Length */
+  urb_getdesc.setup[7] = 0;
+  urb_getdesc.data_p = urb_getdesc.data;
+  urb_getdesc.seq = 0;
+  urb_getdesc.devid = 0;
+  urb_getdesc.dir = USBIP_DIR_IN;
+  urb_getdesc.ep = 0;
+  urb_getdesc.len = 64;
+  handle_control_urb (&urb_getdesc);
+  return (const char *)urb_getdesc.data;
 }
 
 static pthread_mutex_t fd_mutex;
 
 static void
-handle_urb (int fd, uint32_t seq)
+unlink_urb (struct urb *urb)
+{
+  pthread_mutex_lock (&urb_mutex);
+  urb->next->prev = urb->prev;
+  urb->prev->next = urb->next;
+  if (urb_list == urb)
+    {
+      if (urb->next == urb)
+	urb_list = NULL;
+      else
+	urb_list = urb->next;
+    }
+  pthread_mutex_unlock (&urb_mutex);
+}
+
+static void * handle_urb_next (void *arg);
+
+static int fd;
+
+static void
+handle_urb (uint32_t seq)
 {
   int r = 0;
-  uint8_t ep;
-  uint8_t dir;
-  uint16_t len;
   struct usbip_msg_head msg;
+  struct usbip_msg_ctl msg_ctl;
+  struct urb *urb;
   const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  pthread_attr_t attr;
 
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate (&attr, PTHREAD_CREATE_DETACHED);
+
+  urb = malloc (sizeof (struct urb));
+  if (urb == NULL)
+    {
+      perror ("URB alloc");
+      exit (1);
+    }
+
+  pthread_mutex_lock (&urb_mutex);
+  if (urb_list == NULL)
+    {
+      urb_list = urb;
+      urb->next = urb->prev = urb;
+    }
+  else
+    {
+      urb->next = urb_list;
+      urb->prev = urb_list->prev;
+      urb_list->prev = urb;
+      urb_list = urb;
+      urb->next = urb->prev = urb;
+    }
+  pthread_mutex_unlock (&urb_mutex);
+
+  urb->seq = seq;
   if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
     {
       perror ("msg recv ctl");
-      r = -1;
+      r = -EINVAL;
       goto leave;
     }
 
-  if (ntohl (msg_ctl.len) > URB_DATA_SIZE)
+  urb->tid = 0;
+  urb->devid = ntohl (msg_ctl.devid);
+  urb->dir = ntohl (msg_ctl.dir);
+  urb->ep = ntohl (msg_ctl.ep);
+  urb->len = ntohl (msg_ctl.len);
+  urb->data_p = urb->data;
+
+  if (urb->len > URB_DATA_SIZE)
     {
       perror ("msg len too long");
-      r = -1;
+      r = -EINVAL;
       goto leave;
     }
 
-  dir = ntohl (msg_ctl.dir);
-  ep = ntohl (msg_ctl.ep);
-  len = ntohl (msg_ctl.len);
+  printf ("URB: dir=%s, ep=%d, len=%d\n", urb->dir==USBIP_DIR_IN? "IN": "OUT",
+	  urb->ep, urb->len);
 
-  printf ("URB: dir=%s, ep=%d, len=%d\n", dir==USBIP_DIR_IN? "IN": "OUT", ep, len);
-
-  if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
+  if (recv (fd, (char *)urb->setup, sizeof (urb->setup), 0) != sizeof (urb->setup))
     {
       perror ("msg recv setup");
-      r = -1;
+      r = -EINVAL;
       goto leave;
     }
 
-  if (ep == 0)
+  if (urb->ep == 0)
     printf ("URB: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	    usb_setup[0], usb_setup[1], usb_setup[2], usb_setup[3],
-	    usb_setup[4], usb_setup[5], usb_setup[6], usb_setup[7]);
+	    urb->setup[0], urb->setup[1], urb->setup[2], urb->setup[3],
+	    urb->setup[4], urb->setup[5], urb->setup[6], urb->setup[7]);
 
-  usb_data_p = usb_data;
-
-  if (dir == USBIP_DIR_OUT && len)
+  if (urb->dir == USBIP_DIR_OUT && urb->len)
     {
-      if (recv (fd, usb_data, len, 0) != len)
+      if (recv (fd, urb->data, urb->len, 0) != urb->len)
 	{
 	  perror ("msg recv data");
-	  r = -1;
+	  r = -EINVAL;
 	  goto leave;
 	}
     }
 
-  if (ep == 0)
-    r = handle_control_urb (dir, len);
-  else
-    r = handle_data_urb (ep, dir, len);
+  r = pthread_create (&urb->tid, &attr, handle_urb_next, urb);
+  pthread_attr_destroy (&attr);
+  if (r == 0)
+    {
+      return;
+    }
+
+  r = -r;
 
  leave:
-  if (dir == USBIP_DIR_IN)
+  msg.cmd = htonl (REP_URB_SUBMIT);
+  msg.seq = htonl (urb->seq);
+
+  msg_ctl.devid = 0;
+  msg_ctl.dir = 0;
+  msg_ctl.ep = 0;
+  msg_ctl.status = htonl (r);
+  msg_ctl.len = 0;
+  msg_ctl.rsvd[0] = msg_ctl.rsvd[1] = 0;
+  msg_ctl.err_cnt = 0;
+  
+  pthread_mutex_lock (&fd_mutex);
+  if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
+    {
+      perror ("reply send");
+    }
+
+  if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+    {
+      perror ("reply send");
+    }
+
+  if ((size_t)send (fd, zeros, sizeof (zeros), 0) != sizeof (zeros))
+    {
+      perror ("reply send");
+    }
+
+  pthread_mutex_unlock (&fd_mutex);
+  unlink_urb (urb);
+  free (urb);
+}
+
+static void *
+handle_urb_next (void *arg)
+{
+  struct urb *urb = arg;
+  int r = 0;
+  struct usbip_msg_head msg;
+  struct usbip_msg_ctl msg_ctl;
+  const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+
+  puts ("call hcu");
+  if (urb->ep == 0)
+    r = handle_control_urb (urb);
+  else
+    r = handle_data_urb (urb);
+
+  printf ("hcu: %d\n", r);
+  if (urb->dir == USBIP_DIR_IN)
     {
       if (r >= 0)
-	len = r;
+	urb->len = r;
       else
-	len = 0;
-
-      msg_ctl.len = htonl (len);
+	urb->len = 0;
     }
   else
-    msg_ctl.len = 0;
+    urb->len = 0;
 
   msg.cmd = htonl (REP_URB_SUBMIT);
-  msg.seq = htonl (seq);
+  msg.seq = htonl (urb->seq);
 
-  msg_ctl.ep = 0;
+  msg_ctl.devid = 0;
   msg_ctl.dir = 0;
+  msg_ctl.ep = 0;
+  msg_ctl.len = htonl (urb->len);
   msg_ctl.rsvd[0] = msg_ctl.rsvd[1] = 0;
   msg_ctl.err_cnt = 0;
 
   if (r < 0)
-    msg_ctl.flags_status = htonl (r);
+    msg_ctl.status = htonl (r);
   else
-    msg_ctl.flags_status = 0;
+    msg_ctl.status = 0;
 
   pthread_mutex_lock (&fd_mutex);
   if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
@@ -498,19 +623,23 @@ handle_urb (int fd, uint32_t seq)
       perror ("reply send");
     }
 
-  if (dir == USBIP_DIR_IN && len)
+  if (urb->dir == USBIP_DIR_IN && urb->len)
     {
-      if (send (fd, usb_data, len, 0) != len)
+      if (send (fd, urb->data, urb->len, 0) != urb->len)
 	{
 	  perror ("reply send");
 	}
     }
   pthread_mutex_unlock (&fd_mutex);
+
+  unlink_urb (urb);
+  free (urb);
+  return NULL;
 }
 
 
 static void
-send_reply (int fd, char *reply, int ok)
+send_reply (char *reply, int ok)
 {
   char buf[8];
   char *p = buf;
@@ -543,11 +672,13 @@ run_server (void *arg)
   int sock;
   struct sockaddr_in v4addr;
   const int one = 1;
+  int attached = 0;
 
   pthread_mutex_init (&usbc.mutex, NULL);
   pthread_cond_init (&usbc.cond, NULL);
 
   pthread_mutex_init (&fd_mutex, NULL);
+  pthread_mutex_init (&urb_mutex, NULL);
 
   (void)arg;
   if ((sock = socket (PF_INET, SOCK_STREAM, 0)) < 0)
@@ -578,125 +709,201 @@ run_server (void *arg)
       exit (1);
     }
 
+ again:
+  /* We don't care who is connecting.  */
+  if ((fd = accept (sock, NULL, NULL)) < 0)
+    {
+      perror ("accept");
+      exit (1);
+    }
+
   for (;;)
     {
-      int fd;
-      int attached = 0;
+      struct usbip_msg_head msg;
 
-      /* We don't care who is connecting.  */
-      if ((fd = accept (sock, NULL, NULL)) < 0)
-        {
-          perror ("accept");
-          exit (1);
-        }
+      if (recv (fd, (char *)&msg, sizeof (msg), 0) != sizeof (msg))
+	{
+	  perror ("msg recv");
+	  break;
+	}
 
-      for (;;)
-        {
-	  struct usbip_msg_head msg;
+      msg.cmd = ntohl (msg.cmd);
+      msg.seq = ntohl (msg.seq);
+
+      if (msg.cmd == CMD_REQ_LIST)
+	{
+	  const char *device_list;
+	  size_t device_list_size;
+
+	  printf ("Device List\n");
+	  if (attached)
+	    {
+	      fprintf (stderr, "REQ list while attached\n");
+	      break;
+	    }
+
+	  device_list = list_devices (&device_list_size);
+
+	  pthread_mutex_lock (&fd_mutex);
+	  send_reply (USBIP_REPLY_DEVICE_LIST, !!device_list);
+
+	  if (send (fd, NETWORK_UINT32_ONE, 4, 0) == 4
+	      && (size_t)send (fd, device_list, device_list_size, 0) == device_list_size)
+	    pthread_mutex_unlock (&fd_mutex);
+	  else
+	    {
+	      pthread_mutex_unlock (&fd_mutex);
+	      perror ("list send");
+	      break;
+	    }
+
+	  close (fd);
+	  goto again;
+	}
+      else if (msg.cmd == CMD_REQ_ATTACH)
+	{
+	  const char *attach;
+	  size_t attach_size;
 	  char busid[32];
 
-	  if (recv (fd, (char *)&msg, sizeof (msg), 0) != sizeof (msg))
+	  printf ("Attach device\n");
+	  if (attached)
 	    {
-	      perror ("msg recv");
+	      fprintf (stderr, "REQ attach while attached\n");
 	      break;
 	    }
-
-	  msg.cmd = ntohl (msg.cmd);
-	  msg.seq = ntohl (msg.seq);
-
-	  if (msg.cmd == CMD_REQ_LIST)
-	    {
-	      const char *device_list;
-	      size_t device_list_size;
-
-	      printf ("Device List\n");
-	      if (attached)
-		{
-		  fprintf (stderr, "REQ list while attached\n");
-		  break;
-		}
-
-	      device_list = list_devices (&device_list_size);
-
-	      pthread_mutex_lock (&fd_mutex);
-	      send_reply (fd, USBIP_REPLY_DEVICE_LIST, !!device_list);
-
-	      if (send (fd, NETWORK_UINT32_ONE, 4, 0) == 4
-		  && (size_t)send (fd, device_list, device_list_size, 0) == device_list_size)
-		pthread_mutex_unlock (&fd_mutex);
-	      else
-		{
-		  pthread_mutex_unlock (&fd_mutex);
-		  perror ("list send");
-		  break;
-		}
-	    }
-	  else if (msg.cmd == CMD_REQ_ATTACH)
-	    {
-	      const char *attach;
-	      size_t attach_size;
-
-	      printf ("Attach device\n");
-	      if (attached)
-		{
-		  fprintf (stderr, "REQ attach while attached\n");
-		  break;
-		}
 	      
-	      if (recv (fd, busid, 32, 0) != 32)
-		{
-		  perror ("attach recv");
-		  break;
-		}
-
-	      attach = attach_device (busid, &attach_size);
-
-	      pthread_mutex_lock (&fd_mutex);
-	      send_reply (fd, USBIP_REPLY_ATTACH, !!attach);
-	      if (attach
-		  && (size_t)send (fd, attach, attach_size, 0) == attach_size)
-		{
-		  printf ("Attach device!\n");
-		  attached = 1;
-		  pthread_mutex_unlock (&fd_mutex);
-		}
-	      else
-		{
-		  pthread_mutex_unlock (&fd_mutex);
-		  perror ("list send");
-		  break;
-		}
-	    }
-	  else if (msg.cmd == CMD_URB_SUBMIT)
+	  if (recv (fd, busid, 32, 0) != 32)
 	    {
-	      if (!attached)
-		{
-		  fprintf (stderr, "SUBMIT while attached\n");
-		  break;
-		}
-
-	      printf ("SUBMIT!\n");
-	      handle_urb (fd, msg.seq);
-	    }
-	  else if (msg.cmd == CMD_URB_UNLINK)
-	    {
-	      if (!attached)
-		{
-		  fprintf (stderr, "UNLINK while attached\n");
-		  break;
-		}
-
+	      perror ("attach recv");
 	      break;
+	    }
+
+	  attach = attach_device (busid, &attach_size);
+
+	  pthread_mutex_lock (&fd_mutex);
+	  send_reply (USBIP_REPLY_ATTACH, !!attach);
+	  if (attach
+	      && (size_t)send (fd, attach, attach_size, 0) == attach_size)
+	    {
+	      printf ("Attach device!\n");
+	      attached = 1;
+	      pthread_mutex_unlock (&fd_mutex);
 	    }
 	  else
 	    {
-	      fprintf (stderr, "Unknown command %08x, disconnecting.\n", msg.cmd);
+	      pthread_mutex_unlock (&fd_mutex);
+	      perror ("attach send");
 	      break;
 	    }
 	}
+      else if (msg.cmd == CMD_URB_SUBMIT)
+	{
+	  if (!attached)
+	    {
+	      fprintf (stderr, "SUBMIT while not attached\n");
+	      break;
+	    }
 
-       close (fd);
+	  printf ("URB SUBMIT!\n");
+	  handle_urb (msg.seq);
+	}
+      else if (msg.cmd == CMD_URB_UNLINK)
+	{
+	  struct usbip_msg_ctl msg_ctl;
+	  const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+	  uint32_t seq;
+	  struct urb *urb;
+	  char buf[8];
+
+	  if (!attached)
+	    {
+	      fprintf (stderr, "UNLINK while not attached\n");
+	      break;
+	    }
+
+	  if (recv (fd, (char *)&msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+	    {
+	      perror ("msg recv ctl");
+	      break;
+	    }
+
+	  if (recv (fd, buf, sizeof (buf), 0) != sizeof (buf))
+	    {
+	      perror ("msg recv setup");
+	      break;
+	    }
+
+	  seq = ntohl (msg_ctl.status);
+	  printf ("URB UNLINK! %d\n", seq);
+
+	  pthread_mutex_lock (&urb_mutex);
+	  if (urb_list)
+	    {
+	      int found = 0;
+
+	      urb = urb_list;
+	      do
+		{
+		  if (urb->seq == seq)
+		    {
+		      found = 1;
+		      break;
+		    }
+		  urb = urb->next;
+		}
+	      while (urb != urb_list);
+
+	      if (found)
+		{
+		  pthread_cancel (urb->tid);
+		  urb->next->prev = urb->prev;
+		  urb->prev->next = urb->next;
+		  if (urb_list == urb)
+		    {
+		      if (urb->next == urb)
+			urb_list = NULL;
+		      else
+			urb_list = urb->next;
+		    }
+		}
+	    }
+	  pthread_mutex_unlock (&urb_mutex);
+
+	  msg.cmd = htonl (REP_URB_UNLINK);
+	  msg.seq = htonl (msg.seq);
+
+	  msg_ctl.devid = 0;
+	  msg_ctl.dir = 0;
+	  msg_ctl.ep = 0;
+	  msg_ctl.status = 0;
+
+	  pthread_mutex_lock (&fd_mutex);
+	  if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
+	    {
+	      perror ("reply send");
+	    }
+
+	  if ((size_t)send (fd, &msg_ctl, sizeof (msg_ctl), 0) != sizeof (msg_ctl))
+	    {
+	      perror ("reply send");
+	    }
+
+	  if ((size_t)send (fd, zeros, sizeof (zeros), 0) != sizeof (zeros))
+	    {
+	      perror ("reply send");
+	    }
+	  pthread_mutex_unlock (&fd_mutex);
+	}
+      else
+	{
+	  fprintf (stderr, "Unknown command %08x, disconnecting.\n", msg.cmd);
+	  break;
+	}
     }
+
+  close (fd);
+  close (sock);
 
   return NULL;
 }
@@ -710,7 +917,7 @@ static struct usb_control usbc_ep_out[7];
  *                      \-------> Error
  */
 static int
-control_setup_transaction (uint8_t dir)
+control_setup_transaction (struct urb *urb)
 {
   int r;
 
@@ -720,15 +927,16 @@ control_setup_transaction (uint8_t dir)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex);
     else if (usbc_ep0.state == USB_STATE_SETUP)
       {
-	if (dir == USBIP_DIR_OUT
-	    && usb_setup[6] == 0 && usb_setup[7] == 0)
+	if (urb->dir == USBIP_DIR_OUT
+	    && urb->setup[6] == 0 && urb->setup[7] == 0)
 	  /* Control Write Transfer with no data stage.  */
 	  r = 1;
 	else
 	  r = 0;
 
 	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_SETUP, 0, dir);
+	memcpy (usb_setup, urb->setup, sizeof (usb_setup));
+	notify_device (USB_INTR_SETUP, 0, urb->dir);
 	break;
       }
     else
@@ -911,22 +1119,7 @@ write_data_transaction (int ep_num, char *buf, uint16_t count)
   pthread_mutex_lock (&usbc_p->mutex);
   while (1)
     if (usbc_p->state == USB_STATE_NAK)
-      {
-	struct timespec ts;
-	clock_gettime (CLOCK_REALTIME, &ts);
-	ts.tv_nsec += USB_URB_TIMEOUT;
-	if (ts.tv_nsec >= 1000000000L)
-	  {
-	    ts.tv_nsec -= 1000000000L;
-	    ts.tv_sec++;
-	  }
-	r = pthread_cond_timedwait (&usbc_p->cond, &usbc_p->mutex, &ts);
-	if (r)
-	  {
-	    r = -EINPROGRESS;
-	    break;
-	  }
-      }
+      pthread_cond_wait (&usbc_p->cond, &usbc_p->mutex);
     else if (usbc_p->state == USB_STATE_RX)
       {
 	if (usbc_p->len < count)
@@ -970,22 +1163,7 @@ read_data_transaction (int ep_num, char *buf)
   pthread_mutex_lock (&usbc_p->mutex);
   while (1)
     if (usbc_p->state == USB_STATE_NAK)
-      {
-	struct timespec ts;
-	clock_gettime (CLOCK_REALTIME, &ts);
-	ts.tv_nsec += USB_URB_TIMEOUT;
-	if (ts.tv_nsec >= 1000000000L)
-	  {
-	    ts.tv_nsec -= 1000000000L;
-	    ts.tv_sec++;
-	  }
-	r = pthread_cond_timedwait (&usbc_p->cond, &usbc_p->mutex, &ts);
-	if (r)
-	  {
-	    r = -EINPROGRESS;
-	    break;
-	  }
-      }
+      pthread_cond_wait (&usbc_p->cond, &usbc_p->mutex);
     else if (usbc_p->state == USB_STATE_TX)
       {
 	if (usbc_p->len > 64)
@@ -1086,6 +1264,7 @@ usb_lld_shutdown (void)
    */
   pthread_cancel (tid_usbip);
   pthread_join (tid_usbip, NULL);
+  /* FIXME: Cancel all URB threads here.  */
 }
 
 #define USB_MAKE_EV(event) (event<<24)
