@@ -974,7 +974,7 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
     }
 
   act.sa_handler = usb_intr;
-  sigemptyset (&act.sa_mask);
+  sigfillset (&act.sa_mask);
   act.sa_flags = 0;
   sigaction (SIGUSR1, &act, NULL);
 

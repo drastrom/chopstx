@@ -59,6 +59,8 @@
 #define MHZ 72
 #endif
 
+static sigset_t ss_cur;
+
 static void
 chx_systick_reset (void)
 {
@@ -98,11 +100,7 @@ usec_to_ticks (uint32_t usec)
 static void
 chx_enable_intr (uint8_t irq_num)
 {
-  sigset_t ss;
-
-  sigemptyset (&ss);
-  sigaddset (&ss, irq_num);
-  pthread_sigmask (SIG_UNBLOCK, &ss, NULL);
+  sigdelset (&ss_cur, irq_num);
 }
 
 static void
@@ -114,11 +112,7 @@ chx_clr_intr (uint8_t irq_num)
 static void
 chx_disable_intr (uint8_t irq_num)
 {
-  sigset_t ss;
-
-  sigemptyset (&ss);
-  sigaddset (&ss, irq_num);
-  pthread_sigmask (SIG_BLOCK, &ss, NULL);
+  sigaddset (&ss_cur, irq_num);
 }
 
 static void
@@ -236,7 +230,6 @@ struct chx_thread {		/* inherits PQ */
 };
 
 
-static sigset_t ss_orig;
 
 static void
 chx_cpu_sched_lock (void)
@@ -244,13 +237,13 @@ chx_cpu_sched_lock (void)
   sigset_t ss;
 
   sigfillset (&ss);
-  pthread_sigmask (SIG_BLOCK, &ss, &ss_orig);
+  pthread_sigmask (SIG_BLOCK, &ss, &ss_cur);
 }
 
 static void
 chx_cpu_sched_unlock (void)
 {
-  pthread_sigmask (SIG_SETMASK, &ss_orig, NULL);
+  pthread_sigmask (SIG_SETMASK, &ss_cur, NULL);
 }
 
 /*
@@ -556,8 +549,10 @@ chx_init (void)
   struct chx_thread *tp = &main_thread;
   struct sigaction sa;
 
+  sigemptyset (&ss_cur);
+
   sa.sa_handler = sigalrm_handler;
-  sigemptyset (&sa.sa_mask);
+  sigfillset (&sa.sa_mask);
   sa.sa_flags = 0;
   sigaction (SIGALRM, &sa, NULL); 
 
@@ -657,7 +652,8 @@ chx_request_preemption (uint16_t prio)
        * We don't need to fill the mask here.  It keeps the condition
        * of blocking signals before&after swapcontext call.  It is
        * done by the signal mask for sigaction, the initial creation
-       * of the thread, the chx_sched function.
+       * of the thread, and the condition of chx_sched function which
+       * mandates holding cpu_sched_lock.
        */
       swapcontext (&tp_prev->tc, tcp);
     }
