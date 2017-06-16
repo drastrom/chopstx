@@ -216,7 +216,7 @@ static uint8_t usb_setup[8];
 static char usb_data[URB_DATA_SIZE];
 static char *usb_data_p;
 
-static int control_setup_transaction (void);
+static int control_setup_transaction (uint8_t dir);
 static int control_write_data_transaction (char *buf, uint16_t count);
 static int control_write_status_transaction (void);
 static int control_read_data_transaction (char *buf);
@@ -230,7 +230,7 @@ handle_control_urb (uint8_t dir, uint16_t len)
 {
   int r;
 
-  r = control_setup_transaction ();
+  r = control_setup_transaction (dir);
   if (r < 0)
     return r;
 
@@ -279,13 +279,12 @@ handle_control_urb (uint8_t dir, uint16_t len)
 	      return -1;
 	    }
 	}
-      if (r > 0)
+      if (r >= 0)
 	{
 	  r = control_read_status_transaction ();
-	  msg_ctl.len = htonl (count);
+	  if (r >= 0)
+	    r = count;
 	}
-      else
-	msg_ctl.len = 0;
     }
 
   return r;
@@ -343,12 +342,7 @@ handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
 	    }
 	}
       if (r >= 0)
-	{
-	  msg_ctl.len = htonl (count);
-	  r = 0;
-	}
-      else
-	msg_ctl.len = 0;
+	r = count;
     }
 
   return r;
@@ -359,14 +353,14 @@ handle_data_urb  (uint8_t ep_num, uint8_t dir, uint16_t len)
 static const char *
 issue_get_desc (void)
 {
-  usb_setup[0] = 0x80;		        /* Type: GET, Standard, DEVICE */
+  usb_setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
   usb_setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
-  usb_setup[2] = 0;			/* Value H: device desc */
-  usb_setup[3] = 0;			/* Value L: 0 */
-  usb_setup[4] = 0;              	/* Index */
+  usb_setup[2] = 0;			 /* Value L: device desc */
+  usb_setup[3] = 0;			 /* Value H: 0 */
+  usb_setup[4] = 0;              	 /* Index */
   usb_setup[5] = 0;
-  usb_setup[6] = 0;		        /* Length */
-  usb_setup[7] = 63;
+  usb_setup[6] = 63;		         /* Length */
+  usb_setup[7] = 0;
   usb_data_p = usb_data;
   handle_control_urb (USBIP_DIR_IN, 63);
   return (const char *)usb_data;
@@ -398,7 +392,6 @@ handle_urb (int fd, uint32_t seq)
   dir = ntohl (msg_ctl.dir);
   ep = ntohl (msg_ctl.ep);
   len = ntohl (msg_ctl.len);
-  msg_ctl.len = 0;
 
   if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
     {
@@ -425,7 +418,15 @@ handle_urb (int fd, uint32_t seq)
     r = handle_data_urb (ep, dir, len);
 
  leave:
-  len = ntohl (msg_ctl.len);
+  if (dir == USBIP_DIR_IN)
+    {
+      if (r >= 0)
+	len = r;
+      else
+	len = 0;
+
+      msg_ctl.len = htonl (len);
+    }
   msg.cmd = htonl (RET_URB);
   msg.seq = htonl (seq);
 
@@ -550,12 +551,6 @@ run_server (void *arg)
 	      const char *device_list;
 	      size_t device_list_size;
 
-	      if (recv (fd, busid, 32, 0) != 32)
-		{
-		  perror ("msg recv");
-		  break;
-		}
-
 	      if (attached)
 		{
 		  fprintf (stderr, "REQ list while attached\n");
@@ -673,7 +668,7 @@ static struct usb_control usbc_ep_out[7];
  *                      \-------> Error
  */
 static int
-control_setup_transaction (void)
+control_setup_transaction (uint8_t dir)
 {
   int r;
 
@@ -683,7 +678,7 @@ control_setup_transaction (void)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex);
     else if (usbc_ep0.state == USB_STATE_SETUP)
       {
-	if (msg_ctl.dir == USBIP_DIR_OUT
+	if (dir == USBIP_DIR_OUT
 	    && usb_setup[6] == 0 && usb_setup[6] == 7)
 	  /* Control Write Transfer with no data satage.  */
 	  r = 1;
@@ -691,7 +686,7 @@ control_setup_transaction (void)
 	  r = 0;
 
 	usbc_ep0.state = USB_STATE_NAK;
-	notify_device (USB_INTR_SETUP, 0, msg_ctl.dir);
+	notify_device (USB_INTR_SETUP, 0, dir);
 	break;
       }
     else
@@ -962,6 +957,7 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
 
   sigemptyset (&sigset);
   sigaddset (&sigset, SIGUSR1);
+  sigaddset (&sigset, SIGALRM);
 
   /*
    * Launch the thread for USBIP.  This maps to usb_lld_sys_init where
