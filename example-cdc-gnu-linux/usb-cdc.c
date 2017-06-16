@@ -275,6 +275,7 @@ usb_ctrl_write_finish (struct usb_dev *dev)
    * The transaction was already finished.  So, it is no use to call
    * usb_lld_ctrl_error when the condition does not match.
    */
+  puts ("usb_ctrl_write_finish");
 }
 
 
@@ -405,6 +406,7 @@ usb_set_configuration (struct usb_dev *dev)
   uint8_t current_conf;
 
   current_conf = usb_lld_current_configuration (dev);
+  printf ("set_conf: %d ->%d\n", current_conf, dev->dev_req.value);
   if (current_conf == 0)
     {
       if (dev->dev_req.value != 1)

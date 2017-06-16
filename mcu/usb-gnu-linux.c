@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #include <arpa/inet.h>
 #include <sys/types.h>
@@ -258,6 +259,7 @@ handle_control_urb (uint8_t dir, uint16_t len)
       uint16_t remain = len;
       uint16_t count;
 
+      printf ("hcu: %d\n", r);
       while (r == 0)
 	{
 	  if (remain > 64)
@@ -414,7 +416,7 @@ handle_urb (int fd, uint32_t seq)
   ep = ntohl (msg_ctl.ep);
   len = ntohl (msg_ctl.len);
 
-  printf ("URB: dir=%d, ep=%d, len=%d\n", dir, ep, len);
+  printf ("URB: dir=%s, ep=%d, len=%d\n", dir==USBIP_DIR_IN? "IN": "OUT", ep, len);
 
   if (recv (fd, (char *)usb_setup, sizeof (usb_setup), 0) != sizeof (usb_setup))
     {
@@ -467,7 +469,7 @@ handle_urb (int fd, uint32_t seq)
   msg_ctl.err_cnt = 0;
 
   if (r < 0)
-    msg_ctl.flags_status = htonl (1);
+    msg_ctl.flags_status = htonl (r);
   else
     msg_ctl.flags_status = 0;
 
@@ -655,7 +657,7 @@ run_server (void *arg)
 		}
 
 	      printf ("URB!\n");
-	      /* Possibly spawn a thread for each URB.  */
+	      /* Possibly spawn a thread for each URB.  But then, we need to serialize INTR.  */
 	      handle_urb (fd, msg.seq);
 	    }
 	  else if (msg.cmd == CMD_DETACH)
@@ -703,8 +705,8 @@ control_setup_transaction (uint8_t dir)
     else if (usbc_ep0.state == USB_STATE_SETUP)
       {
 	if (dir == USBIP_DIR_OUT
-	    && usb_setup[6] == 0 && usb_setup[6] == 7)
-	  /* Control Write Transfer with no data satage.  */
+	    && usb_setup[6] == 0 && usb_setup[7] == 0)
+	  /* Control Write Transfer with no data stage.  */
 	  r = 1;
 	else
 	  r = 0;
@@ -742,6 +744,7 @@ control_write_data_transaction (char *buf, uint16_t count)
       {
 	if (usbc_ep0.len < count)
 	  {
+	    fprintf (stderr, "*** usbc_ep0.len < count");
 	    r = -1;
 	    usbc_ep0.state = USB_STATE_STALL;
 	  }
@@ -782,6 +785,7 @@ control_write_status_transaction (void)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex);
     else if (usbc_ep0.state == USB_STATE_TX)
       {
+	puts ("control_write_status_transaction");
 	if (usbc_ep0.len != 0)
 	  fprintf (stderr, "*** ACK length %d\n", usbc_ep0.len);
 	usbc_ep0.state = USB_STATE_SETUP;
@@ -791,7 +795,7 @@ control_write_status_transaction (void)
       }
     else
       {
-	r = -1;
+	r = -EPIPE;
 	break;
       }
   pthread_mutex_unlock (&usbc_ep0.mutex);
@@ -903,7 +907,7 @@ write_data_transaction (int ep_num, char *buf, uint16_t count)
 	r = pthread_cond_timedwait (&usbc_p->cond, &usbc_p->mutex, &ts);
 	if (r)
 	  {
-	    r = -1;
+	    r = -EINPROGRESS;
 	    break;
 	  }
       }
@@ -962,7 +966,7 @@ read_data_transaction (int ep_num, char *buf)
 	r = pthread_cond_timedwait (&usbc_p->cond, &usbc_p->mutex, &ts);
 	if (r)
 	  {
-	    r = -1;
+	    r = -EINPROGRESS;
 	    break;
 	  }
       }
