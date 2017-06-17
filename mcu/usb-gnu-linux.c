@@ -474,7 +474,6 @@ handle_urb (uint32_t seq)
       urb->prev = urb_list->prev;
       urb_list->prev = urb;
       urb_list = urb;
-      urb->next = urb->prev = urb;
     }
   pthread_mutex_unlock (&urb_mutex);
 
@@ -839,20 +838,18 @@ run_server (void *arg)
 	  printf ("URB UNLINK! %d\n", seq);
 
 	  pthread_mutex_lock (&urb_mutex);
-	  if (urb_list)
+	  if ((urb = urb_list))
 	    {
 	      int found = 0;
 
-	      urb = urb_list;
 	      do
-		{
-		  if (urb->seq == seq)
-		    {
-		      found = 1;
-		      break;
-		    }
+		if (urb->seq == seq)
+		  {
+		    found = 1;
+		    break;
+		  }
+		else
 		  urb = urb->next;
-		}
 	      while (urb != urb_list);
 
 	      if (found)
