@@ -1183,7 +1183,7 @@ read_data_transaction (int ep_num, char *buf)
 	    count = usbc_p->len;
 	    memcpy (buf, usbc_p->buf, count);
 	    usbc_p->state = USB_STATE_NAK;
-	    notify_device (USB_INTR_DATA_TRANSFER, 0, USBIP_DIR_IN);
+	    notify_device (USB_INTR_DATA_TRANSFER, ep_num, USBIP_DIR_IN);
 	    r = count;
 	  }
 	break;
