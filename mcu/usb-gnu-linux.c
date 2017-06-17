@@ -207,7 +207,7 @@ attach_device (char busid[32], size_t *len_p)
   return (const char *)&usbip_usb_device;
 }
 
-#define URB_DATA_SIZE 65536
+#define URB_DATA_SIZE 65535
 
 struct usbip_msg_ctl {
   uint32_t devid;
@@ -241,10 +241,10 @@ static uint8_t usb_setup[8];
 static int control_setup_transaction (struct urb *urb);
 static int control_write_data_transaction (char *buf, uint16_t count);
 static int control_write_status_transaction (void);
-static int control_read_data_transaction (char *buf);
+static int control_read_data_transaction (char *buf, uint16_t count);
 static int control_read_status_transaction (void);
 static int write_data_transaction (int ep_num, char *buf, uint16_t count);
-static int read_data_transaction (int ep_num, char *buf);
+static int read_data_transaction (int ep_num, char *buf, uint16_t count);
 
 enum {
   USB_STATE_DISABLED = 0,
@@ -269,6 +269,8 @@ static int
 handle_control_urb (struct urb *urb)
 {
   int r;
+  uint16_t count;
+  uint16_t remain = urb->len;
 
   puts ("hcu 0");
   r = control_setup_transaction (urb);
@@ -278,9 +280,6 @@ handle_control_urb (struct urb *urb)
   puts ("hcu 1");
   if (urb->dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
-      uint16_t remain = urb->len;
-      uint16_t count;
-
       printf ("hcu: %d\n", r);
       while (r == 0)
 	{
@@ -294,6 +293,7 @@ handle_control_urb (struct urb *urb)
 	    break;
 
 	  urb->data_p += count;
+	  remain -= count;
 	  if (count < 64)
 	    break;
 	}
@@ -302,25 +302,23 @@ handle_control_urb (struct urb *urb)
     }
   else
     {				/* Input from device to host.  */
-      int count = 0;
       puts ("hcu 2");
       while (1)
 	{
-	  r = control_read_data_transaction (urb->data_p);
+	  if (remain > 64)
+	    count = 64;
+	  else
+	    count = remain;
+
+	  r = control_read_data_transaction (urb->data_p, count);
 	  if (r < 0)
 	    break;
 
 	  puts ("hcu 3");
-	  count += r;
+	  remain -= r;
 	  urb->data_p += r;
 	  if (r < 64)
 	    break;
-
-	  if (count == URB_DATA_SIZE)
-	    {
-	      perror ("control IN too long");
-	      return -1;
-	    }
 	}
       puts ("hcu 4");
       if (r >= 0)
@@ -328,7 +326,7 @@ handle_control_urb (struct urb *urb)
 	  puts ("hcu 5");
 	  r = control_read_status_transaction ();
 	  if (r >= 0)
-	    r = count;
+	    r = remain;
 	}
       printf ("hcu 6: %d\n", r);
     }
@@ -340,13 +338,12 @@ static int
 handle_data_urb  (struct urb *urb)
 {
   int r;
+  uint16_t count;
+  uint16_t remain = urb->len;
 
   puts ("hdu 0");
   if (urb->dir == USBIP_DIR_OUT)
     {				/* Output from host to device.  */
-      uint16_t remain = urb->len;
-      uint16_t count;
-
       puts ("hdu 1");
       while (1)
 	{
@@ -362,6 +359,7 @@ handle_data_urb  (struct urb *urb)
 
 	  puts ("hdu 3");
 	  urb->data_p += count;
+	  remain -= count;
 	  if (count < 64)
 	    {
 	      r = 0;
@@ -371,30 +369,27 @@ handle_data_urb  (struct urb *urb)
     }
   else
     {				/* Input from device to host.  */
-      int count = 0;
-
       puts ("hdu 4");
       while (1)
 	{
 	  puts ("hdu 5");
-	  r = read_data_transaction (urb->ep, urb->data_p);
+	  if (remain > 64)
+	    count = 64;
+	  else
+	    count = remain;
+
+	  r = read_data_transaction (urb->ep, urb->data_p, count);
 	  if (r < 0)
 	    break;
 
 	  puts ("hdu 6");
-	  count += r;
+	  remain -= r;
 	  urb->data_p += r;
 	  if (r < 64)
 	    break;
-
-	  if (count == URB_DATA_SIZE)
-	    {
-	      perror ("IN too long");
-	      return -1;
-	    }
 	}
       if (r >= 0)
-	r = count;
+	r = remain;
     }
 
   return r;
@@ -457,7 +452,7 @@ handle_urb (uint32_t seq)
   const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
   pthread_attr_t attr;
 
-  pthread_attr_init(&attr);
+  pthread_attr_init (&attr);
   pthread_attr_setdetachstate (&attr, PTHREAD_CREATE_DETACHED);
 
   urb = malloc (sizeof (struct urb));
@@ -531,7 +526,7 @@ handle_urb (uint32_t seq)
     }
 
   r = pthread_create (&urb->tid, &attr, handle_urb_next, urb);
-  pthread_attr_destroy (&attr);
+  // pthread_attr_destroy (&attr);
   if (r == 0)
     {
       return;
@@ -590,8 +585,8 @@ handle_urb_next (void *arg)
   printf ("hu-next: %d (%d)\n", r, urb->seq);
   if (urb->dir == USBIP_DIR_IN)
     {
-      if (r >= 0)
-	urb->len = r;
+      if (r >= 0)	      /* R>0 means buf remained as unused.  */
+	urb->len -= r;
       else
 	urb->len = 0;
     }
@@ -862,7 +857,7 @@ run_server (void *arg)
 
 	      if (found)
 		{
-		  pthread_cancel (urb->tid);
+		  // pthread_cancel (urb->tid);
 		  urb->next->prev = urb->prev;
 		  urb->prev->next = urb->next;
 		  if (urb_list == urb)
@@ -1041,29 +1036,26 @@ control_write_status_transaction (void)
  *         \-{NAK}--------------> again
  */
 static int
-control_read_data_transaction (char *buf)
+control_read_data_transaction (char *buf, uint16_t count)
 {
   int r;
-  uint16_t count;
-
   pthread_mutex_lock (&usbc_ep0.mutex);
   while (1)
     if (usbc_ep0.state == USB_STATE_NAK)
       pthread_cond_wait (&usbc_ep0.cond, &usbc_ep0.mutex);
     else if (usbc_ep0.state == USB_STATE_TX)
       {
-	if (usbc_ep0.len > 64)
+	if (usbc_ep0.len > count)
 	  {
 	    fprintf (stderr, "*** length %d\n", usbc_ep0.len);
 	    r = -1;
 	  }
 	else
 	  {
-	    count = usbc_ep0.len;
-	    memcpy (buf, usbc_ep0.buf, count);
+	    memcpy (buf, usbc_ep0.buf, usbc_ep0.len);
 	    usbc_ep0.state = USB_STATE_NAK;
 	    notify_device (USB_INTR_DATA_TRANSFER, 0, USBIP_DIR_IN);
-	    r = count;
+	    r = usbc_ep0.len;
 	  }
 	break;
       }
@@ -1161,10 +1153,9 @@ write_data_transaction (int ep_num, char *buf, uint16_t count)
  *         \-{NAK}--------------> again
  */
 static int
-read_data_transaction (int ep_num, char *buf)
+read_data_transaction (int ep_num, char *buf, uint16_t count)
 {
   int r;
-  uint16_t count;
   struct usb_control *usbc_p = &usbc_ep_in[ep_num];
 
   pthread_mutex_lock (&usbc_p->mutex);
@@ -1173,18 +1164,17 @@ read_data_transaction (int ep_num, char *buf)
       pthread_cond_wait (&usbc_p->cond, &usbc_p->mutex);
     else if (usbc_p->state == USB_STATE_TX)
       {
-	if (usbc_p->len > 64)
+	if (usbc_p->len > count)
 	  {
 	    fprintf (stderr, "*** length %d\n", usbc_p->len);
 	    r = -1;
 	  }
 	else
 	  {
-	    count = usbc_p->len;
-	    memcpy (buf, usbc_p->buf, count);
+	    memcpy (buf, usbc_p->buf, usbc_p->len);
 	    usbc_p->state = USB_STATE_NAK;
 	    notify_device (USB_INTR_DATA_TRANSFER, ep_num, USBIP_DIR_IN);
-	    r = count;
+	    r = usbc_p->len;
 	  }
 	break;
       }
