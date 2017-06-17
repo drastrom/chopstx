@@ -330,10 +330,9 @@ handle_control_urb (struct urb *urb)
 	  if (r >= 0)
 	    r = count;
 	}
-      puts ("hcu 6");
+      printf ("hcu 6: %d\n", r);
     }
 
-  // usbc_ep0.state = USB_STATE_SETUP;
   return r;
 }
 
@@ -948,6 +947,7 @@ control_setup_transaction (struct urb *urb)
       }
     else
       {
+	printf ("cst error %d\n", usbc_ep0.state);
 	r = -1;
 	break;
       }
@@ -1202,9 +1202,14 @@ void chx_handle_intr (uint32_t irq_num);
 #define INTR_REQ_USB SIGUSR1
 
 static void
-usb_intr (int signum)
+usb_intr (int signum, siginfo_t *siginfo, void *arg)
 {
+  extern void chx_sigmask (ucontext_t *uc);
+
+  ucontext_t *uc = arg;
   (void)signum;
+  (void)siginfo;
+  chx_sigmask (uc);
   chx_handle_intr (INTR_REQ_USB);
 }
 
@@ -1235,9 +1240,9 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
       exit (1);
     }
 
-  act.sa_handler = usb_intr;
+  act.sa_sigaction = usb_intr;
   sigfillset (&act.sa_mask);
-  act.sa_flags = 0;
+  act.sa_flags = SA_SIGINFO;
   sigaction (SIGUSR1, &act, NULL);
 
   pthread_sigmask (SIG_UNBLOCK, &sigset, NULL);
@@ -1729,6 +1734,7 @@ static int handle_in0 (struct usb_dev *dev)
     }
   else
     {
+      puts ("handle_in0 error");
       dev->state = STALLED;
       pthread_mutex_lock (&usbc_ep0.mutex);
       usbc_ep0.state = USB_STATE_STALL;
@@ -1765,6 +1771,7 @@ static void handle_out0 (struct usb_dev *dev)
        * Or else, unexpected state.
        * STALL the endpoint, until we receive the next SETUP token.
        */
+      puts ("handle_out0 error");
       dev->state = STALLED;
       pthread_mutex_lock (&usbc_ep0.mutex);
       usbc_ep0.state = USB_STATE_STALL;

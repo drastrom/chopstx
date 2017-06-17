@@ -45,6 +45,7 @@ LDFLAGS   = $(MCFLAGS) -nostartfiles -T$(LDSCRIPT) \
 else
 MCFLAGS   =
 LDFLAGS   = 
+DEFS      += -D_GNU_SOURCE
 endif
 
 CFLAGS    = $(MCFLAGS) $(OPT) $(CWARN) -Wa,-alms=$(BUILDDIR)/$(notdir $(<:.c=.lst)) $(DEFS)

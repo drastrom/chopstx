@@ -536,10 +536,30 @@ static char idle_stack[4096];
 
 static struct chx_thread main_thread;
 
-static void
-sigalrm_handler (int sig)
+void
+chx_sigmask (ucontext_t *uc)
 {
+  /* Modify oldmask to SS_CUR, so that the signal mask will
+   * be set to SS_CUR.
+   *
+   * In user-level, sigset_t is big, but only the first word
+   * is used by the kernel.
+   */
+#ifdef __x86_64__
+  memcpy (&uc->uc_mcontext.gregs[REG_OLDMASK],
+	  &ss_cur, sizeof (long long));
+#else
+#error "Please write the code to access oldmask!"
+#endif
+}
+
+static void
+sigalrm_handler (int sig, siginfo_t *siginfo, void *arg)
+{
+  ucontext_t *uc = arg;
   (void)sig;
+  (void)siginfo;
+  chx_sigmask (uc);
   chx_timer_expired ();
 }
 
@@ -551,9 +571,9 @@ chx_init (void)
 
   sigemptyset (&ss_cur);
 
-  sa.sa_handler = sigalrm_handler;
+  sa.sa_sigaction = sigalrm_handler;
   sigfillset (&sa.sa_mask);
-  sa.sa_flags = 0;
+  sa.sa_flags = SA_SIGINFO;
   sigaction (SIGALRM, &sa, NULL); 
 
   getcontext (&idle_tc);
