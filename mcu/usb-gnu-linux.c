@@ -1372,13 +1372,12 @@ static void handle_datastage_in (struct usb_dev *dev)
   if (len > data_p->len)
     len = data_p->len;
 
-  data_p->len -= len;
-  data_p->addr += len;
-
   pthread_mutex_lock (&usbc_ep0.mutex);
   usbc_ep0.buf = data_p->addr;
   usbc_ep0.len = len;
   usbc_ep0.state = USB_STATE_TX;
+  data_p->len -= len;
+  data_p->addr += len;
   pthread_cond_signal (&usbc_ep0.cond);
   pthread_mutex_unlock (&usbc_ep0.mutex);
 }
