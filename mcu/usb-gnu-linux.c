@@ -334,6 +334,13 @@ handle_control_urb (struct urb *urb)
       printf ("hcu 6: %d\n", r);
     }
 
+  if (r < 0)
+    {
+      puts ("hcu 7");
+      /* recovery.  */
+      usbc_ep0.state = USB_STATE_SETUP;
+    }
+
   return r;
 }
 
@@ -453,10 +460,6 @@ handle_urb (uint32_t seq)
   struct usbip_msg_ctl msg_ctl;
   struct urb *urb;
   const char zeros[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-  pthread_attr_t attr;
-
-  pthread_attr_init (&attr);
-  pthread_attr_setdetachstate (&attr, PTHREAD_CREATE_DETACHED);
 
   urb = malloc (sizeof (struct urb));
   if (urb == NULL)
@@ -529,11 +532,22 @@ handle_urb (uint32_t seq)
 	}
     }
 
-  r = pthread_create (&urb->tid, &attr, handle_urb_next, urb);
-  // pthread_attr_destroy (&attr);
-  if (r == 0)
+  if (urb->ep == 0)
     {
+      handle_urb_next (urb);
       return;
+    }
+  else
+    {
+      pthread_attr_t attr;
+
+      pthread_attr_init (&attr);
+      pthread_attr_setdetachstate (&attr, PTHREAD_CREATE_DETACHED);
+
+      r = pthread_create (&urb->tid, &attr, handle_urb_next, urb);
+      pthread_attr_destroy (&attr);
+      if (r == 0)
+	return;
     }
 
   r = -r;
