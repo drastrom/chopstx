@@ -174,12 +174,15 @@ static struct usb_controller usbc;
 static void
 notify_device (uint8_t intr, uint8_t ep_num, uint8_t dir)
 {
+  extern sigset_t ss_cur;
+
   pthread_mutex_lock (&usbc.mutex);
   if (usbc.intr)
     pthread_cond_wait (&usbc.cond, &usbc.mutex);
   usbc.intr = intr;
   usbc.dir = (dir == USBIP_DIR_IN);
   usbc.ep_num = ep_num;
+  fprintf (stderr, "sigmask: %08llx\n", *(long long *)&ss_cur);
   pthread_kill (tid_main, SIGUSR1);
   pthread_mutex_unlock (&usbc.mutex);
 }
@@ -473,6 +476,8 @@ handle_urb (uint32_t seq)
       urb->next = urb_list;
       urb->prev = urb_list->prev;
       urb_list->prev = urb;
+      if (urb_list->next == urb_list)
+	urb_list->next = urb;
       urb_list = urb;
     }
   pthread_mutex_unlock (&urb_mutex);
@@ -902,7 +907,7 @@ run_server (void *arg)
 
   close (fd);
   close (sock);
-
+  exit (1);
   return NULL;
 }
 

@@ -59,7 +59,10 @@
 #define MHZ 72
 #endif
 
-static sigset_t ss_cur;
+#if 0
+static
+#endif
+ sigset_t ss_cur;
 
 static void
 chx_systick_reset (void)
