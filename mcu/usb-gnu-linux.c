@@ -1722,6 +1722,7 @@ static int handle_in0 (struct usb_dev *dev)
       usbc_ep0.buf = usb_setup;
       usbc_ep0.len = 8;
       usbc_ep0.state = USB_STATE_SETUP;
+      pthread_cond_signal (&usbc_ep0.cond);
       pthread_mutex_unlock (&usbc_ep0.mutex);
     }
   else
@@ -1753,6 +1754,7 @@ static void handle_out0 (struct usb_dev *dev)
       usbc_ep0.buf = usb_setup;
       usbc_ep0.len = 8;
       usbc_ep0.state = USB_STATE_SETUP;
+      pthread_cond_signal (&usbc_ep0.cond);
       pthread_mutex_unlock (&usbc_ep0.mutex);
     }
   else
@@ -1961,6 +1963,7 @@ usb_lld_rx_enable_buf (int ep_num, void *buf, size_t len)
   usbc_p->len = len;
   pthread_cond_signal (&usbc_p->cond);
   pthread_mutex_unlock (&usbc_p->mutex);
+  printf ("usb_lld_rx_enable_buf: %d\n", ep_num);
 }
 
 
@@ -1975,4 +1978,5 @@ usb_lld_tx_enable_buf (int ep_num, const void *buf, size_t len)
   usbc_p->len = len;
   pthread_cond_signal (&usbc_p->cond);
   pthread_mutex_unlock (&usbc_p->mutex);
+  printf ("usb_lld_tx_enable_buf: %d\n", ep_num);
 }
