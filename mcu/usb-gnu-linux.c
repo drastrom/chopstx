@@ -402,7 +402,7 @@ usbip_handle_control_urb (struct urb *urb)
 static void register_urb_ep (struct usb_control *usbc_p, struct urb *urb);
 
 static int
-usbip_handle_data_urb  (struct urb *urb)
+usbip_handle_data_urb (struct urb *urb)
 {
   int r;
   struct usb_control *usbc_p;
@@ -738,6 +738,7 @@ register_urb_ep (struct usb_control *usbc_p, struct urb *urb)
 	  uint64_t l;
 	  int r;
 
+	  puts ("rue read");
 	  read (usbc_p->eventfd, &l, sizeof (l));
 	  r = hc_handle_data_urb (usbc_p);
 
@@ -745,6 +746,7 @@ register_urb_ep (struct usb_control *usbc_p, struct urb *urb)
 	    {
 	      usbip_finish_urb (urb, r);
 	      usbc_p->urb = NULL;
+	      /* FIXME: rescan the list and register??? */
 	    }
 	}
     }
@@ -1080,15 +1082,17 @@ usbip_run_server (void *arg)
 	    }
 	  if ((pollfds[i*2].revents & POLLIN))
 	    {
-	      read (usbc_ep_in[i].eventfd, &l, sizeof (l));
+	      puts ("poll in read");
 	      if (usbc_ep_in[i].urb)
 		{
+		  read (usbc_ep_in[i].eventfd, &l, sizeof (l));
 		  pthread_mutex_lock (&usbc_ep_in[i].mutex);
 		  r = hc_handle_data_urb (&usbc_ep_in[i]);
 		  if (r <= 0)
 		    {
 		      usbip_finish_urb (usbc_ep_in[i].urb, r);
 		      usbc_ep_in[i].urb = NULL;
+		      /* FIXME: rescan the list and register??? */
 		    }
 		  pthread_mutex_unlock (&usbc_ep_in[i].mutex);
 		}
@@ -1102,15 +1106,17 @@ usbip_run_server (void *arg)
 	    }
 	  if ((pollfds[i*2+1].revents & POLLIN))
 	    {
-	      read (usbc_ep_out[i].eventfd, &l, sizeof (l));
+	      puts ("poll out read");
 	      if (usbc_ep_out[i].urb)
 		{
+		  read (usbc_ep_out[i].eventfd, &l, sizeof (l));
 		  pthread_mutex_lock (&usbc_ep_out[i].mutex);
 		  r = hc_handle_data_urb (&usbc_ep_out[i]);
 		  if (r <= 0)
 		    {
 		      usbip_finish_urb (usbc_ep_out[i].urb, r);
 		      usbc_ep_out[i].urb = NULL;
+		      /* FIXME: rescan the list and register??? */
 		    }
 		  pthread_mutex_unlock (&usbc_ep_out[i].mutex);
 		}
@@ -1416,7 +1422,7 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
 
   act.sa_sigaction = usb_intr;
   sigfillset (&act.sa_mask);
-  act.sa_flags = SA_SIGINFO;
+  act.sa_flags = SA_SIGINFO|SA_RESTART;
   sigaction (SIGUSR1, &act, NULL);
 
   pthread_sigmask (SIG_UNBLOCK, &sigset, NULL);
@@ -2138,7 +2144,7 @@ void
 usb_lld_rx_enable_buf (int ep_num, void *buf, size_t len)
 {
   struct usb_control *usbc_p = &usbc_ep_out[ep_num];
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   pthread_mutex_lock (&usbc_p->mutex);
   usbc_p->state = USB_STATE_READY;
@@ -2155,7 +2161,7 @@ void
 usb_lld_tx_enable_buf (int ep_num, const void *buf, size_t len)
 {
   struct usb_control *usbc_p = &usbc_ep_in[ep_num];
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   pthread_mutex_lock (&usbc_p->mutex);
   usbc_p->state = USB_STATE_READY;

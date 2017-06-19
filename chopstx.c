@@ -576,7 +576,7 @@ chx_init (void)
 
   sa.sa_sigaction = sigalrm_handler;
   sigfillset (&sa.sa_mask);
-  sa.sa_flags = SA_SIGINFO;
+  sa.sa_flags = SA_SIGINFO|SA_RESTART;
   sigaction (SIGALRM, &sa, NULL); 
 
   getcontext (&idle_tc);
