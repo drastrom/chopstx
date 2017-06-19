@@ -87,12 +87,29 @@ struct usbip_usb_device {
   uint8_t bNumInterfaces;
 } __attribute__((packed));
 
+struct urb {
+  struct urb *next;
+  struct urb *prev;
+
+  uint16_t remain;
+  char *data_p;
+
+  pthread_t tid;
+  uint32_t seq;
+  uint32_t devid;
+  uint32_t dir;
+  uint32_t ep;
+  uint32_t len;
+  uint8_t setup[8];
+  char data[0];
+};
+
 /*
  * Only support a single device.
  */
 static struct usbip_usb_device usbip_usb_device;
 
-static const char *issue_get_desc (void);
+static struct urb *issue_get_desc (void);
 
 #define MY_BUS_ID "1-1\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
@@ -102,10 +119,8 @@ static const char *issue_get_desc (void);
 static void
 refresh_usb_device (void)
 {
-  const char *desc;
-
-  /* Issue device descriptor request, and fill usbip_usb_device.  */
-  desc = issue_get_desc ();
+  struct urb *urb = issue_get_desc ();
+  char *desc = urb->data;
 
   memset (usbip_usb_device.path, 0, 256);
   strcpy (usbip_usb_device.path,
@@ -144,6 +159,7 @@ refresh_usb_device (void)
   usbip_usb_device.bConfigurationValue = 0;
   usbip_usb_device.bNumConfigurations = desc[17];
   usbip_usb_device.bNumInterfaces = 0;
+  free (urb);
 }
 
 #define USBIP_REPLY_HEADER_SIZE 8
@@ -227,23 +243,6 @@ struct usbip_msg_ctl {
   uint32_t len;
   uint32_t rsvd[2];
   uint32_t err_cnt;
-};
-
-struct urb {
-  struct urb *next;
-  struct urb *prev;
-
-  uint16_t remain;
-  char *data_p;
-
-  pthread_t tid;
-  uint32_t seq;
-  uint32_t devid;
-  uint32_t dir;
-  uint32_t ep;
-  uint32_t len;
-  uint8_t setup[8];
-  char data[0];
 };
 
 static pthread_mutex_t urb_mutex;
@@ -533,27 +532,29 @@ hc_handle_data_urb  (struct usb_control *usbc_p)
 
 #define USB_REQ_GET_DESCRIPTOR		0x06
 
-static struct urb urb_getdesc;
-
-static const char *
+static struct urb *
 issue_get_desc (void)
 {
-  urb_getdesc.setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
-  urb_getdesc.setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
-  urb_getdesc.setup[2] = 0;			 /* Value L: desc_index */
-  urb_getdesc.setup[3] = 1;			 /* Value H: desc_type */
-  urb_getdesc.setup[4] = 0;              	 /* Index */
-  urb_getdesc.setup[5] = 0;
-  urb_getdesc.setup[6] = 64;		         /* Length */
-  urb_getdesc.setup[7] = 0;
-  urb_getdesc.data_p = urb_getdesc.data;
-  urb_getdesc.seq = 0;
-  urb_getdesc.devid = 0;
-  urb_getdesc.dir = USBIP_DIR_IN;
-  urb_getdesc.ep = 0;
-  urb_getdesc.len = 64;
-  hc_handle_control_urb (&urb_getdesc);
-  return (const char *)urb_getdesc.data;
+  struct urb *urb;
+
+  urb = malloc (sizeof (struct urb) + 64);
+
+  urb->setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
+  urb->setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
+  urb->setup[2] = 0;			 /* Value L: desc_index */
+  urb->setup[3] = 1;			 /* Value H: desc_type */
+  urb->setup[4] = 0;              	 /* Index */
+  urb->setup[5] = 0;
+  urb->setup[6] = 64;		         /* Length */
+  urb->setup[7] = 0;
+  urb->data_p = urb->data;
+  urb->seq = 0;
+  urb->devid = 0;
+  urb->dir = USBIP_DIR_IN;
+  urb->ep = 0;
+  urb->remain = urb->len = 64;
+  hc_handle_control_urb (urb);
+  return urb;
 }
 
 
@@ -1362,7 +1363,6 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
   sigset_t sigset;
   struct sigaction act;
   uint8_t ep;
-  uint64_t l = 0;
 
   sigemptyset (&sigset);
   sigaddset (&sigset, SIGUSR1);
@@ -1426,7 +1426,6 @@ usb_lld_init (struct usb_dev *dev, uint8_t feature)
   dev->state = WAIT_SETUP;
 
   usbc_ep0.state = USB_STATE_READY;
-  write (usbc_ep0.eventfd, &l, sizeof (l));
 }
 
 
@@ -1481,7 +1480,7 @@ static void handle_datastage_out (struct usb_dev *dev)
 {
   struct ctrl_data *data_p = &dev->ctrl_data;
   uint32_t len;
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   pthread_mutex_lock (&usbc_ep0.mutex);
   len = usbc_ep0.len;
@@ -1515,7 +1514,7 @@ static void handle_datastage_in (struct usb_dev *dev)
 {
   struct ctrl_data *data_p = &dev->ctrl_data;
   uint32_t len = USB_MAX_PACKET_SIZE;
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   if ((data_p->len == 0) && (dev->state == LAST_IN_DATA))
     {
@@ -1878,7 +1877,7 @@ handle_setup0 (struct usb_dev *dev)
 static int handle_in0 (struct usb_dev *dev)
 {
   int r = 0;
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   if (dev->state == IN_DATA || dev->state == LAST_IN_DATA)
     handle_datastage_in (dev);
@@ -1917,7 +1916,7 @@ static int handle_in0 (struct usb_dev *dev)
 
 static void handle_out0 (struct usb_dev *dev)
 {
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   if (dev->state == OUT_DATA)
     /* Usual case.  */
@@ -1989,7 +1988,7 @@ usb_handle_transfer (struct usb_dev *dev, uint8_t dir, uint8_t ep_num)
 int
 usb_lld_ctrl_ack (struct usb_dev *dev)
 {
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   dev->state = WAIT_STATUS_IN;
   pthread_mutex_lock (&usbc_ep0.mutex);
@@ -2005,7 +2004,7 @@ int
 usb_lld_ctrl_recv (struct usb_dev *dev, void *p, size_t len)
 {
   struct ctrl_data *data_p = &dev->ctrl_data;
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   data_p->addr = p;
   data_p->len = len;
@@ -2027,7 +2026,7 @@ usb_lld_ctrl_send (struct usb_dev *dev, const void *buf, size_t buflen)
   struct ctrl_data *data_p = &dev->ctrl_data;
   uint32_t len_asked = dev->dev_req.len;
   uint32_t len;
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   data_p->addr = (void *)buf;
   data_p->len = buflen;
@@ -2071,7 +2070,7 @@ usb_lld_current_configuration (struct usb_dev *dev)
 void
 usb_lld_ctrl_error (struct usb_dev *dev)
 {
-  uint64_t l = 0;
+  const uint64_t l = 1;
 
   puts ("ctrl_error");
   dev->state = STALLED;
@@ -2085,12 +2084,9 @@ usb_lld_ctrl_error (struct usb_dev *dev)
 void
 usb_lld_reset (struct usb_dev *dev, uint8_t feature)
 {
-  uint64_t l = 0;
-
   usb_lld_set_configuration (dev, 0);
   dev->feature = feature;
   usbc_ep0.state = USB_STATE_READY;
-  write (usbc_ep0.eventfd, &l, sizeof (l));
 }
 
 void
