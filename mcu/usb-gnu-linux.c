@@ -399,8 +399,6 @@ usbip_handle_control_urb (struct urb *urb)
   usbip_finish_urb (urb, r);
 }
 
-static void register_urb_ep (struct usb_control *usbc_p, struct urb *urb);
-
 static int
 usbip_handle_data_urb (struct urb *urb)
 {
@@ -420,7 +418,8 @@ usbip_handle_data_urb (struct urb *urb)
     r = -EAGAIN;
   else /* nak or ready */
     {
-      register_urb_ep (usbc_p, urb);
+      if (usbc_p->urb == NULL)
+	usbc_p->urb = urb;
       r = 0;
     }
   pthread_mutex_unlock (&usbc_p->mutex);
@@ -538,6 +537,8 @@ issue_get_desc (void)
   struct urb *urb;
 
   urb = malloc (sizeof (struct urb) + 64);
+
+  urb->next = urb->prev = urb;
 
   urb->setup[0] = 0x80;		         /* Type: GET, Standard, DEVICE */
   urb->setup[1] = USB_REQ_GET_DESCRIPTOR; /* Request */
@@ -727,30 +728,6 @@ usbip_send_reply (char *reply, int ok)
 
 static int attached = 0;
 
-static void
-register_urb_ep (struct usb_control *usbc_p, struct urb *urb)
-{
-  if (usbc_p->urb == NULL)
-    {
-      usbc_p->urb = urb;
-      if (usbc_p->state == USB_STATE_READY)
-	{
-	  uint64_t l;
-	  int r;
-
-	  puts ("rue read");
-	  read (usbc_p->eventfd, &l, sizeof (l));
-	  r = hc_handle_data_urb (usbc_p);
-
-	  if (r <= 0)
-	    {
-	      usbip_finish_urb (urb, r);
-	      usbc_p->urb = NULL;
-	      /* FIXME: rescan the list and register??? */
-	    }
-	}
-    }
-}
 
 static void
 unlink_urb_ep (struct urb *urb)
@@ -961,6 +938,51 @@ usbip_process_cmd (void)
   return 0;
 }
 
+static void
+usbip_ep_ready (struct usb_control *usbc_p)
+{
+  uint64_t l;
+  int r;
+
+  if (!usbc_p->urb)
+    {
+      puts ("???usbip_ep_ready");
+      return;
+    }
+
+  read (usbc_p->eventfd, &l, sizeof (l));
+  pthread_mutex_lock (&usbc_p->mutex);
+  r = hc_handle_data_urb (usbc_p);
+  if (r <= 0)
+    {
+      struct urb *urb;
+      int found = 0;
+
+      urb = usbc_p->urb->prev;
+      do
+	{
+	  if (urb->ep == usbc_p->urb->ep
+	      && urb->dir == usbc_p->urb->dir)
+	    {
+	      if (urb != usbc_p->urb)
+		found = 1;
+	      break;
+	    }
+	  if (urb == urb_list)
+	    break;
+	  urb = urb->prev;
+	}
+      while (1);
+
+      usbip_finish_urb (usbc_p->urb, r);
+
+      if (found)
+	usbc_p->urb = urb;
+      else
+	usbc_p->urb = NULL;
+    }
+  pthread_mutex_unlock (&usbc_p->mutex);
+}
 
 /*
  * In the USBIP protocol, client sends URB (USB Request Block) to this
@@ -1023,10 +1045,8 @@ usbip_run_server (void *arg)
   for (i = 1; i < 8; i++)
     {
       pollfds[i*2].fd = usbc_ep_in[i].eventfd;
-      pollfds[i*2].events = POLLIN;
       pollfds[i*2].revents = 0;
       pollfds[i*2+1].fd = usbc_ep_out[i].eventfd;
-      pollfds[i*2+1].events = POLLIN;
       pollfds[i*2+1].revents = 0;
     }
 
@@ -1045,6 +1065,22 @@ usbip_run_server (void *arg)
   for (;;)
     {
       int r;
+
+      for (i = 1; i < 8; i++)
+	{
+	  if (usbc_ep_in[i].urb)
+	    pollfds[i*2].events = POLLIN;
+	  else
+	    pollfds[i*2].events = 0;
+
+	  if (usbc_ep_out[i].urb)
+	    pollfds[i*2+1].events = POLLIN;
+	  else
+	    pollfds[i*2+1].events = 0;
+
+	  pollfds[i*2].revents = 0;
+	  pollfds[i*2+1].revents = 0;
+	}
 
       if (poll (pollfds, 16, -1) < 0)
 	{
@@ -1072,8 +1108,6 @@ usbip_run_server (void *arg)
 
       for (i = 1; i < 8; i++)
 	{
-	  uint64_t l;
-
 	  if ((pollfds[i*2].revents & POLLNVAL)
 	      || (pollfds[i*2].revents & POLLERR))
 	    {
@@ -1083,19 +1117,7 @@ usbip_run_server (void *arg)
 	  if ((pollfds[i*2].revents & POLLIN))
 	    {
 	      puts ("poll in read");
-	      if (usbc_ep_in[i].urb)
-		{
-		  read (usbc_ep_in[i].eventfd, &l, sizeof (l));
-		  pthread_mutex_lock (&usbc_ep_in[i].mutex);
-		  r = hc_handle_data_urb (&usbc_ep_in[i]);
-		  if (r <= 0)
-		    {
-		      usbip_finish_urb (usbc_ep_in[i].urb, r);
-		      usbc_ep_in[i].urb = NULL;
-		      /* FIXME: rescan the list and register??? */
-		    }
-		  pthread_mutex_unlock (&usbc_ep_in[i].mutex);
-		}
+	      usbip_ep_ready (&usbc_ep_in[i]);
 	    }
 
 	  if ((pollfds[i*2+1].revents & POLLNVAL)
@@ -1107,19 +1129,7 @@ usbip_run_server (void *arg)
 	  if ((pollfds[i*2+1].revents & POLLIN))
 	    {
 	      puts ("poll out read");
-	      if (usbc_ep_out[i].urb)
-		{
-		  read (usbc_ep_out[i].eventfd, &l, sizeof (l));
-		  pthread_mutex_lock (&usbc_ep_out[i].mutex);
-		  r = hc_handle_data_urb (&usbc_ep_out[i]);
-		  if (r <= 0)
-		    {
-		      usbip_finish_urb (usbc_ep_out[i].urb, r);
-		      usbc_ep_out[i].urb = NULL;
-		      /* FIXME: rescan the list and register??? */
-		    }
-		  pthread_mutex_unlock (&usbc_ep_out[i].mutex);
-		}
+	      usbip_ep_ready (&usbc_ep_out[i]);
 	    }
 	}
     }
@@ -2086,7 +2096,7 @@ usb_lld_ctrl_error (struct usb_dev *dev)
   pthread_mutex_unlock (&usbc_ep0.mutex);
 }
 
-/* FIXME:??? */
+/* FIXME: ??? */
 void
 usb_lld_reset (struct usb_dev *dev, uint8_t feature)
 {
