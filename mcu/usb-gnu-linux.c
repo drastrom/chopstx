@@ -444,9 +444,11 @@ usbip_finish_urb (struct urb *urb, int r)
   msg_ctl.devid = 0;
   msg_ctl.dir = 0;
   msg_ctl.ep = 0;
-  msg_ctl.len = htonl (urb->len);
+  msg_ctl.len = htonl (urb->len);/*???*/
   msg_ctl.rsvd[0] = msg_ctl.rsvd[1] = 0;
   msg_ctl.err_cnt = 0;
+
+  fprintf (stderr, "ufu: %d (%d)\n", r, urb->seq);
 
   if (r < 0)
     msg_ctl.status = htonl (r);
@@ -850,6 +852,7 @@ usbip_process_cmd (void)
       uint32_t seq;
       struct urb *urb;
       char buf[8];
+      int found = 0;
 
       if (!attached)
 	{
@@ -870,13 +873,10 @@ usbip_process_cmd (void)
 	}
 
       seq = ntohl (msg_ctl.status);
-      printf ("URB UNLINK! %d\n", seq);
 
       pthread_mutex_lock (&urb_mutex);
       if ((urb = urb_list))
 	{
-	  int found = 0;
-
 	  do
 	    if (urb->seq == seq)
 	      {
@@ -910,7 +910,12 @@ usbip_process_cmd (void)
       msg_ctl.devid = 0;
       msg_ctl.dir = 0;
       msg_ctl.ep = 0;
-      msg_ctl.status = 0;
+      if (found)
+	msg_ctl.status = htonl(-ECONNRESET);
+      else
+	msg_ctl.status = 0;
+
+      printf ("URB UNLINK! %d: %s\n", seq, found?"o":"x");
 
       pthread_mutex_lock (&fd_mutex);
       if ((size_t)send (fd, &msg, sizeof (msg), 0) != sizeof (msg))
