@@ -145,6 +145,7 @@ main (int argc, const char *argv[])
 
       chopstx_usec_wait (50*1000);
 
+      puts("send ZLP");
       /* Send ZLP at the beginning.  */
       tty_send (tty, s, 0);
 
@@ -153,6 +154,7 @@ main (int argc, const char *argv[])
       s[1] = hexchar (count & 0x0f);
       count++;
 
+      puts("send hello");
       if (tty_send (tty, s, 32) < 0)
 	continue;
 
@@ -161,6 +163,7 @@ main (int argc, const char *argv[])
 	  int size;
 	  uint32_t usec;
 
+	  puts("recv msg");
 	  usec = 3000000;	/* 3.0 seconds */
 	  size = tty_recv (tty, s + 4, &usec);
 	  if (size < 0)
@@ -170,6 +173,7 @@ main (int argc, const char *argv[])
 	    {
 	      size--;
 
+	      puts("send msg");
 	      s[0] = hexchar (size >> 4);
 	      s[1] = hexchar (size & 0x0f);
 	      s[2] = ':';

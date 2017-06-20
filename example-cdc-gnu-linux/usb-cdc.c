@@ -534,7 +534,7 @@ usb_tx_done (uint8_t ep_num, uint16_t len)
   struct tty *t = tty_get (-1, ep_num);
 
   (void)len;
-
+  puts ("usb_tx_done");
   if (ep_num == ENDP1)
     {
       chopstx_mutex_lock (&t->mtx);
@@ -615,7 +615,7 @@ static void
 usb_rx_ready (uint8_t ep_num, uint16_t len)
 {
   struct tty *t = tty_get (-1, ep_num);
-
+  puts ("usb_rx_ready");
   if (ep_num == ENDP3)
     {
       int i;

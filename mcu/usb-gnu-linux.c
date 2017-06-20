@@ -510,8 +510,11 @@ hc_handle_data_urb  (struct usb_control *usbc_p)
       urb->remain -= count;
 
       if (count < 64)
-	// successfully finished
-	return 0;
+	{
+	  fprintf (stderr, "->data: %d\n", urb->len - urb->remain);
+	  // successfully finished
+	  return 0;
+	}
 
       return 1;
     }
@@ -525,8 +528,11 @@ hc_handle_data_urb  (struct usb_control *usbc_p)
       urb->remain -= r;
       urb->data_p += r;
       if (r < 64)
-	// successfully finished
-	return 0;
+	{
+	  fprintf (stderr, "<-data: %d\n", urb->len - urb->remain);
+	  // successfully finished
+	  return 0;
+	}
 
       return 1;
     }
@@ -1995,12 +2001,12 @@ usb_handle_transfer (struct usb_dev *dev, uint8_t dir, uint8_t ep_num)
       if (dir)
 	{
 	  len = usbc_ep_in[ep_num].len;
-	  return USB_MAKE_TXRX (ep_num, 0, len);
+	  return USB_MAKE_TXRX (ep_num, 1, len);
 	}
       else
 	{
 	  len = usbc_ep_out[ep_num].len;
-	  return  USB_MAKE_TXRX (ep_num, 1, len);
+	  return  USB_MAKE_TXRX (ep_num, 0, len);
 	}
     }
 
