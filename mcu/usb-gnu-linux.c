@@ -1,3 +1,4 @@
+#include <alloca.h>
 /*
  * usb-gnu-linux.c - USB Device Emulation by USBIP Protocol
  *
@@ -511,8 +512,17 @@ hc_handle_data_urb  (struct usb_control *usbc_p)
 
       if (count < 64)
 	{
-	  fprintf (stderr, "->data: %d\n", urb->len - urb->remain);
+	  size_t len = urb->len - urb->remain;
+
+	  fprintf (stderr, "->data: %lu\n", len);
 	  // successfully finished
+	  if (len)
+	    {
+	      char *s = alloca (len + 1);
+	      memcpy (s, urb->data, len);
+	      s[len] = 0;
+	      fprintf (stderr, "   : %s\n", s);
+	    }
 	  return 0;
 	}
 
@@ -529,8 +539,18 @@ hc_handle_data_urb  (struct usb_control *usbc_p)
       urb->data_p += r;
       if (r < 64)
 	{
-	  fprintf (stderr, "<-data: %d\n", urb->len - urb->remain);
+	  size_t len = urb->len - urb->remain;
+
+	  fprintf (stderr, "<-data: %lu\n", len);
 	  // successfully finished
+	  if (len)
+	    {
+	      char *s = alloca (len + 1);
+	      memcpy (s, urb->data, len);
+	      s[len] = 0;
+	      fprintf (stderr, "   : %s\n", s);
+	    }
+	  urb->len = len;
 	  return 0;
 	}
 

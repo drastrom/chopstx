@@ -14,6 +14,7 @@
 static void
 set_led (int on)
 {
+#if 0
 #if 1
   if (on)
     write (1, "********\x08\x08\x08\x08\x08\x08\x08\x08", 16);
@@ -24,6 +25,7 @@ set_led (int on)
     puts ("!");
   else
     puts ("");
+#endif
 #endif
 }
 
