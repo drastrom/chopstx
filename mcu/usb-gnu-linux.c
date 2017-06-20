@@ -360,7 +360,7 @@ hc_handle_control_urb (struct urb *urb)
 	  if (r >= 0)
 	    r = remain;
 	}
-      printf ("hcu 6: %d\n", r);
+      puts ("hcu 6");
     }
 
   if (r < 0)
@@ -374,17 +374,18 @@ hc_handle_control_urb (struct urb *urb)
     /* Wait until the device is ready to accept the SETUP token.  */
     read (usbc_ep0.eventfd, &l, sizeof (l));
 
-  printf ("hu-next: %d (%d)\n", r, urb->seq);
   if (urb->dir == USBIP_DIR_IN)
     {
       if (r >= 0)	      /* R>0 means buf remained as unused.  */
 	urb->len -= r;
       else
 	urb->len = 0;
+      r = 0;
     }
   else
     urb->len = 0;
 
+  printf ("hu-next: %d (%d)\n", urb->len, urb->seq);
   usbc_ep0.urb = NULL;
   return r;
 }
