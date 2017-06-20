@@ -515,6 +515,7 @@ chx_handle_intr (uint32_t irq_num)
 	return;
       }
   chx_spin_unlock (&q_intr.lock);
+  write (2, "??\n", 3);
 }
 
 void
@@ -549,8 +550,7 @@ chx_sigmask (ucontext_t *uc)
    * is used by the kernel.
    */
 #ifdef __x86_64__
-  memcpy (&uc->uc_mcontext.gregs[REG_OLDMASK],
-	  &ss_cur, sizeof (long long));
+  memcpy (&uc->uc_sigmask, &ss_cur, sizeof (uint64_t));
 #else
 #error "Please write the code to access oldmask!"
 #endif
@@ -562,8 +562,8 @@ sigalrm_handler (int sig, siginfo_t *siginfo, void *arg)
   ucontext_t *uc = arg;
   (void)sig;
   (void)siginfo;
-  chx_sigmask (uc);
   chx_timer_expired ();
+  chx_sigmask (uc);
 }
 
 void

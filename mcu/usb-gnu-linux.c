@@ -1357,8 +1357,8 @@ usb_intr (int signum, siginfo_t *siginfo, void *arg)
   ucontext_t *uc = arg;
   (void)signum;
   (void)siginfo;
-  chx_sigmask (uc);
   chx_handle_intr (INTR_REQ_USB);
+  chx_sigmask (uc);
 }
 
 
