@@ -571,9 +571,6 @@ issue_get_desc (void)
 static void
 unlink_urb (struct urb *urb)
 {
-  pthread_mutex_lock (&urb_mutex);
-  urb->next->prev = urb->prev;
-  urb->prev->next = urb->next;
   if (urb_list == urb)
     {
       if (urb->next == urb)
@@ -581,7 +578,9 @@ unlink_urb (struct urb *urb)
       else
 	urb_list = urb->next;
     }
-  pthread_mutex_unlock (&urb_mutex);
+
+  urb->next->prev = urb->prev;
+  urb->prev->next = urb->next;
 }
 
 static void
@@ -624,9 +623,8 @@ usbip_handle_urb (uint32_t seq)
     {
       urb->next = urb_list;
       urb->prev = urb_list->prev;
+      urb_list->prev->next = urb;
       urb_list->prev = urb;
-      if (urb_list->next == urb_list)
-	urb_list->next = urb;
       urb_list = urb;
     }
   pthread_mutex_unlock (&urb_mutex);
@@ -709,7 +707,9 @@ usbip_handle_urb (uint32_t seq)
   pthread_mutex_unlock (&fd_mutex);
   if (urb)
     {
+      pthread_mutex_lock (&urb_mutex);
       unlink_urb (urb);
+      pthread_mutex_unlock (&urb_mutex);
       free (urb);
     }
 }
@@ -742,22 +742,17 @@ static void
 unlink_urb_ep (struct urb *urb)
 {
   struct usb_control *usbc_p;
-  uint64_t l;
 
   if (urb->dir == USBIP_DIR_OUT)
     usbc_p = &usbc_ep_out[urb->ep];
   else
     usbc_p = &usbc_ep_in[urb->ep];
 
+  pthread_mutex_lock (&usbc_p->mutex);
   if (usbc_p->urb == urb)
-    {
-      pthread_mutex_lock (&usbc_p->mutex);
-      if (usbc_p->state == USB_STATE_READY)
-	read (usbc_p->eventfd, &l, sizeof (l));
-      usbc_p->urb = NULL;
-      pthread_mutex_unlock (&usbc_p->mutex);
-    }
-  /* FIXME: rescan the list and register??? */
+    usbc_p->urb = NULL;
+  pthread_mutex_unlock (&usbc_p->mutex);
+/* FIXME: rescan the list and register??? */
 }
 
 static int
@@ -896,15 +891,7 @@ usbip_process_cmd (void)
 
 	  if (found)
 	    {
-	      urb->next->prev = urb->prev;
-	      urb->prev->next = urb->next;
-	      if (urb_list == urb)
-		{
-		  if (urb->next == urb)
-		    urb_list = NULL;
-		  else
-		    urb_list = urb->next;
-		}
+	      unlink_urb (urb);
 	      unlink_urb_ep (urb);
 	      free (urb);
 	    }
