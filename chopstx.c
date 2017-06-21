@@ -549,7 +549,7 @@ chx_sigmask (ucontext_t *uc)
    * In user-level, sigset_t is big, but only the first word
    * is used by the kernel.
    */
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__i386__)
   memcpy (&uc->uc_sigmask, &ss_cur, sizeof (uint64_t));
 #else
 #error "Please write the code to access oldmask!"
