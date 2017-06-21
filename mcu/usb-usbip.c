@@ -1,6 +1,5 @@
-#include <alloca.h>
 /*
- * usb-gnu-linux.c - USB Device Emulation by USBIP Protocol
+ * usb-usbip.c - USB Device Emulation (server side) by USBIP
  *
  * Copyright (C) 2017 g10 Code GmbH
  * Author: NIIBE Yutaka <gniibe@fsij.org>
@@ -26,6 +25,7 @@
  FIXME:
    RESET handling
    USB Shutdown
+   Use reply structure of its own
  */
 
 #include <pthread.h>
@@ -48,6 +48,8 @@
 
 #include <usb_lld.h>
 #include <usb_lld_common.h>
+
+#include <alloca.h>
 
 static pthread_t tid_main;
 static pthread_t tid_usbip;

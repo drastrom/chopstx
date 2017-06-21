@@ -10,7 +10,11 @@ ifneq ($(USE_SYS),)
 CSRC += $(CHOPSTX)/mcu/sys-$(CHIP).c
 endif
 ifneq ($(USE_USB),)
+ifeq ($(EMULATION),)
 CSRC += $(CHOPSTX)/mcu/usb-$(CHIP).c
+else
+CSRC += $(CHOPSTX)/mcu/usb-usbip.c
+endif
 endif
 ifneq ($(USE_ADC),)
 CSRC += $(CHOPSTX)/contrib/adc-$(CHIP).c
