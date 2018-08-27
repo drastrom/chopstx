@@ -3,6 +3,7 @@
 /* echo -n "Black Pill" | shasum -a 256 | sed -e 's/^.*\(........\)  -$/\1/' */
 #define BOARD_ID    0xc7c1f677
 
+#define MCU_STM32F1 1
 #define STM32F10X_MD		/* Medium-density device */
 
 #define STM32_PLLXTPRE                  STM32_PLLXTPRE_DIV1
@@ -19,6 +20,8 @@
  * Port A setup.
  * PA11 - Push Pull output 10MHz 0 default (until USB enabled) (USBDM)
  * PA12 - Push Pull output 10MHz 0 default (until USB enabled) (USBDP)
+ *
+ * Port B setup.
  * PB12 - Push pull output 50MHz (LED 1:ON 0:OFF)
  * ------------------------ Default
  * PAx  - input with pull-up
