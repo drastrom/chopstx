@@ -1,7 +1,8 @@
 /*
- * sys.c - system routines for the initial page for STM32F103.
+ * sys-stm32f103.c - system routines for the initial page for STM32F103.
  *
- * Copyright (C) 2013, 2014, 2015, 2016  Flying Stone Technology
+ * Copyright (C) 2013, 2014, 2015, 2016, 2017, 2018
+ *               Flying Stone Technology
  * Author: NIIBE Yutaka <gniibe@fsij.org>
  *
  * Copying and distribution of this file, with or without modification,
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include "board.h"
 
+#include "mcu/cortex-m.h"
 #include "mcu/clk_gpio_init-stm32.c"
 
 
@@ -80,7 +82,7 @@ usb_lld_sys_init (void)
     {
       usb_lld_sys_shutdown ();
       /* Disconnect requires SE0 (>= 2.5uS).  */
-      wait (300);
+      wait (5*MHZ);
     }
 
   usb_cable_config (1);
@@ -148,7 +150,7 @@ flash_wait_for_last_operation (uint32_t timeout)
 #define FLASH_ERASE_TIMEOUT   0x01000000
 
 static int
-flash_program_halfword (uint32_t addr, uint16_t data)
+flash_program_halfword (uintptr_t addr, uint16_t data)
 {
   int status;
 
@@ -170,7 +172,7 @@ flash_program_halfword (uint32_t addr, uint16_t data)
 }
 
 static int
-flash_erase_page (uint32_t addr)
+flash_erase_page (uintptr_t addr)
 {
   int status;
 
@@ -210,13 +212,13 @@ flash_check_blank (const uint8_t *p_start, size_t size)
 #define FLASH_SIZE_REG   ((uint16_t *)0x1ffff7e0)
 
 static int
-flash_write (uint32_t dst_addr, const uint8_t *src, size_t len)
+flash_write (uintptr_t dst_addr, const uint8_t *src, size_t len)
 {
   int status;
 #if defined(STM32F103_OVERRIDE_FLASH_SIZE_KB)
-  uint32_t flash_end = FLASH_START_ADDR + STM32F103_OVERRIDE_FLASH_SIZE_KB*1024;
+  uintptr_t flash_end = FLASH_START_ADDR + STM32F103_OVERRIDE_FLASH_SIZE_KB*1024;
 #else
-  uint32_t flash_end = FLASH_START_ADDR + (*FLASH_SIZE_REG)*1024;
+  uintptr_t flash_end = FLASH_START_ADDR + (*FLASH_SIZE_REG)*1024;
 #endif
 
   if (dst_addr < FLASH_START || dst_addr + len > flash_end)
@@ -254,6 +256,9 @@ flash_protect (void)
       FLASH->OPTKEYR = FLASH_KEY1;
       FLASH->OPTKEYR = FLASH_KEY2;
 
+      while (!(FLASH->CR & FLASH_CR_OPTWRE))
+	;
+
       FLASH->CR |= FLASH_CR_OPTER;
       FLASH->CR |= FLASH_CR_STRT;
 
@@ -272,11 +277,11 @@ flash_protect (void)
 static void __attribute__((naked))
 flash_erase_all_and_exec (void (*entry)(void))
 {
-  uint32_t addr = FLASH_START;
+  uintptr_t addr = FLASH_START;
 #if defined(STM32F103_OVERRIDE_FLASH_SIZE_KB)
-  uint32_t end = FLASH_START_ADDR + STM32F103_OVERRIDE_FLASH_SIZE_KB*1024;
+  uintptr_t end = FLASH_START_ADDR + STM32F103_OVERRIDE_FLASH_SIZE_KB*1024;
 #else
-  uint32_t end = FLASH_START_ADDR + (*FLASH_SIZE_REG)*1024;
+  uintptr_t end = FLASH_START_ADDR + (*FLASH_SIZE_REG)*1024;
 #endif
   uint32_t page_size = 1024;
   int r;
@@ -299,38 +304,10 @@ flash_erase_all_and_exec (void (*entry)(void))
   for (;;);
 }
 
-struct SCB
-{
-  volatile uint32_t CPUID;
-  volatile uint32_t ICSR;
-  volatile uint32_t VTOR;
-  volatile uint32_t AIRCR;
-  volatile uint32_t SCR;
-  volatile uint32_t CCR;
-  volatile uint8_t  SHP[12];
-  volatile uint32_t SHCSR;
-  volatile uint32_t CFSR;
-  volatile uint32_t HFSR;
-  volatile uint32_t DFSR;
-  volatile uint32_t MMFAR;
-  volatile uint32_t BFAR;
-  volatile uint32_t AFSR;
-  volatile uint32_t PFR[2];
-  volatile uint32_t DFR;
-  volatile uint32_t ADR;
-  volatile uint32_t MMFR[4];
-  volatile uint32_t ISAR[5];
-};
-
-#define SCS_BASE	(0xE000E000)
-#define SCB_BASE	(SCS_BASE +  0x0D00)
-static struct SCB *const SCB = (struct SCB *)SCB_BASE;
-
-#define SYSRESETREQ 0x04
 static void
 nvic_system_reset (void)
 {
-  SCB->AIRCR = (0x05FA0000 | (SCB->AIRCR & 0x70) | SYSRESETREQ);
+  SCB->AIRCR = (0x05FA0000 | (SCB->AIRCR & 0x70) | SCB_AIRCR_SYSRESETREQ);
   asm volatile ("dsb");
   for (;;);
 }
